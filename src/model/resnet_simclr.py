@@ -9,8 +9,8 @@ import torchvision.models as models
 class Resnet(nn.Module):
 
     MODELS = {
-        'resnet18': models.resnet18(pretrained=False),
-        'resnet50': models.resnet50(pretrained=False)
+        'resnet18': models.resnet18(weights=None),
+        'resnet50': models.resnet50(weights=None)
     }
 
     def __init__(self,

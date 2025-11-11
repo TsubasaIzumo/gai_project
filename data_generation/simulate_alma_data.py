@@ -137,7 +137,7 @@ total_time = "20min"
 hour_angle = "transit"
 
 # 为实际目的，限制模拟次数
-max_sims = 10  # 可根据需要调整模拟次数
+max_sims = 1000  # 可根据需要调整模拟次数
 print(f"计划执行 {max_sims} 次模拟")
 
 # 保存当前工作目录

@@ -126,7 +126,8 @@ class GaussianDiffusion:
         self.num_timesteps = int(betas.shape[0])
 
         alphas = 1.0 - betas
-        alphas=alphas+1e-8
+        # 确保alphas在[0, 1]范围内，避免数值不稳定
+        alphas = np.clip(alphas, 0.0, 1.0)
         self.alphas_cumprod = np.cumprod(alphas, axis=0)
         self.alphas_cumprod_prev = np.append(1.0, self.alphas_cumprod[:-1])
         self.alphas_cumprod_next = np.append(self.alphas_cumprod[1:], 0.0)
@@ -137,12 +138,16 @@ class GaussianDiffusion:
         self.sqrt_alphas_cumprod = np.sqrt(self.alphas_cumprod)
         self.sqrt_one_minus_alphas_cumprod = np.sqrt(1.0 - self.alphas_cumprod)
         self.log_one_minus_alphas_cumprod = np.log(1.0 - self.alphas_cumprod)
-        self.sqrt_recip_alphas_cumprod = np.sqrt(1.0 / self.alphas_cumprod)
-        self.sqrt_recipm1_alphas_cumprod = np.sqrt(1.0 / self.alphas_cumprod - 1)
+        # 添加小的epsilon避免除零
+        self.sqrt_recip_alphas_cumprod = np.sqrt(1.0 / (self.alphas_cumprod + 1e-8))
+        # 确保参数非负，避免NaN
+        recipm1 = 1.0 / (self.alphas_cumprod + 1e-8) - 1
+        self.sqrt_recipm1_alphas_cumprod = np.sqrt(np.maximum(recipm1, 1e-8))
 
         # calculations for posterior q(x_{t-1} | x_t, x_0)
+        # 添加小的epsilon避免除零
         self.posterior_variance = (
-            betas * (1.0 - self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod)
+            betas * (1.0 - self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod + 1e-8)
         )
         # log calculation clipped because the posterior variance is 0 at the
         # beginning of the diffusion chain.
@@ -150,12 +155,12 @@ class GaussianDiffusion:
             np.append(self.posterior_variance[1], self.posterior_variance[1:])
         )
         self.posterior_mean_coef1 = (
-            betas * np.sqrt(self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod)
+            betas * np.sqrt(self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod + 1e-8)
         )
         self.posterior_mean_coef2 = (
             (1.0 - self.alphas_cumprod_prev)
             * np.sqrt(alphas)
-            / (1.0 - self.alphas_cumprod)
+            / (1.0 - self.alphas_cumprod + 1e-8)
         )
 
     def q_mean_variance(self, x_start, t):

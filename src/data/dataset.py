@@ -58,24 +58,33 @@ class SkaDataset(Dataset):
         true = np.abs(true)
         true = (true) ** (1. / self.power)
         true = (true - 0.5) / 0.5
+        # 处理NaN和Inf值
+        true = np.nan_to_num(true, nan=0.0, posinf=1e6, neginf=-1e6)
 
         data = {}
         data["filename"] = index
 
         sky_model = torch.from_numpy(true).float()
+        # 确保tensor中没有NaN或Inf
+        sky_model = torch.nan_to_num(sky_model, nan=0.0, posinf=1e6, neginf=-1e6)
 
         def open_dirty_noisy(file_name):
             dirty_noisy_file = os.path.join(self.dirty_noisy_wo_processing_folder, file_name)
             dirty_noisy = np.load(dirty_noisy_file)[np.newaxis, ...]
-            dirty_noisy = np.nan_to_num(dirty_noisy)
+            # 处理NaN和Inf值
+            dirty_noisy = np.nan_to_num(dirty_noisy, nan=0.0, posinf=1e6, neginf=-1e6)
             return dirty_noisy
 
         dirty_noisy = open_dirty_noisy(file_name)
 
         dirty_noisy = dirty_noisy / 5e-4#3.0e-5
+        # 再次检查NaN和Inf
+        dirty_noisy = np.nan_to_num(dirty_noisy, nan=0.0, posinf=1e6, neginf=-1e6)
 
         dirty_noisy = (dirty_noisy - 0.5) / 0.5
         dirty_noisy = torch.from_numpy(dirty_noisy).float()
+        # 确保tensor中没有NaN或Inf
+        dirty_noisy = torch.nan_to_num(dirty_noisy, nan=0.0, posinf=1e6, neginf=-1e6)
 
         data["true"] = torch.nn.functional.interpolate(
             sky_model.unsqueeze(0),

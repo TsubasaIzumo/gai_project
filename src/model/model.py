@@ -317,3 +317,40 @@ def create_classifier(
         resblock_updown=classifier_resblock_updown,
         pool=classifier_pool,
     )
+
+
+# 在 utils.py 或 model_utils.py 中添加
+import math
+import torch.nn as nn
+
+
+def init_weights(model):
+    """为扩散模型初始化权重"""
+    for module in model.modules():
+        # 卷积层初始化
+        if isinstance(module, (nn.Conv2d, nn.Conv3d, nn.ConvTranspose2d, nn.ConvTranspose3d)):
+            nn.init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu')
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+
+        # 线性层初始化
+        elif isinstance(module, nn.Linear):
+            if module.weight.shape[0] == module.weight.shape[1]:
+                nn.init.orthogonal_(module.weight, gain=0.8)
+            else:
+                nn.init.xavier_uniform_(module.weight, gain=0.5)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+
+        # 归一化层初始化
+        elif isinstance(module, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d, nn.GroupNorm)):
+            nn.init.ones_(module.weight)
+            nn.init.zeros_(module.bias)
+
+    # 输出层特殊处理
+    for name, param in model.named_parameters():
+        if 'output_layers' in name or 'final_conv' in name or 'out_conv' in name:
+            if 'weight' in name:
+                nn.init.zeros_(param)
+            elif 'bias' in name:
+                nn.init.zeros_(param)

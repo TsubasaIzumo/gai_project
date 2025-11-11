@@ -5,10 +5,15 @@ import yaml
 
 import pytorch_lightning as pl
 from pytorch_lightning import loggers as pl_loggers
-from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
+from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint, EarlyStopping
 
 from src.trainer import GeneratorModule
 from src.utils import get_config
+from src.model import init_weights
+#
+# import warnings
+# warnings.filterwarnings("ignore", message=".*'pretrained' is deprecated.*")
+# warnings.filterwarnings("ignore", message=".*'weights' are deprecated.*")
 
 
 def main(args) -> None:
@@ -29,24 +34,37 @@ def main(args) -> None:
 
     module = GeneratorModule(config, config['fp16'])
     callback_lr = LearningRateMonitor('step')
-    callback_last_ckpt = ModelCheckpoint(every_n_epochs=1, filename='last_{epoch}_{step}')
-    callback_best_ckpt = ModelCheckpoint(every_n_epochs=1, filename='best_{epoch}_{step}', monitor='val/weighted_loss',
+    callback_last_ckpt = ModelCheckpoint(every_n_val_epochs=1, filename='last_{epoch}_{step}')
+    callback_best_ckpt = ModelCheckpoint(every_n_val_epochs=1, filename='best_{epoch}_{step}', monitor='val/weighted_loss',
                                          mode='min')
+
+    path_checkpoint = config['fine_tune_from']
+
+    early_stop_callback = EarlyStopping(
+        monitor='val/weighted_loss',
+        min_delta=0.00,
+        patience=10,  # 10个评估周期没有改善就停止
+        verbose=True,
+        mode='min'
+    )
 
     trainer = pl.Trainer(logger=logger,
                          callbacks=[
                              callback_lr,
                              callback_last_ckpt,
-                             callback_best_ckpt
+                             callback_best_ckpt,
+                             early_stop_callback
                          ],
-                         gpus=-1,
+                         gpus=1,
                          auto_select_gpus=True,
                          auto_scale_batch_size=auto_bs,
                          max_steps=iterations,
                          check_val_every_n_epoch=eval_every,
-                         strategy='ddp',
+                         # distributed_backend='ddp',
                          precision=precision,
-                         accumulate_grad_batches=accumulate_grad_batches)
+                         accumulate_grad_batches=accumulate_grad_batches,
+                         resume_from_checkpoint=path_checkpoint,
+                         )
 
     if auto_lr:
         lr_finder = trainer.tuner.lr_find(module, min_lr=1e-5, max_lr=1e-1,)
@@ -58,8 +76,8 @@ def main(args) -> None:
     trainer.tune(module)
 
     # checkpoint
-    path_checkpoint = config['fine_tune_from']
-    trainer.fit(module, ckpt_path=path_checkpoint)
+    # trainer.fit(module, load_from_checkpoint=path_checkpoint)
+    trainer.fit(module)
 
     # save config to file
     save_path = Path(logger.experiment.get_logdir()) / Path(config_path).name

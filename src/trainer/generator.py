@@ -63,6 +63,10 @@ class GeneratorModule(pl.LightningModule):
 
         self.model, self.diffusion = create_model_and_diffusion(**params)
 
+        from src.model import init_weights
+        init_weights(self.model)
+        print("Applied custom weight initialization to main model")
+
         self.ema_rate = config['ema_rate']
         self.model_ema = copy.deepcopy(self.model).eval()
 
@@ -106,7 +110,18 @@ class GeneratorModule(pl.LightningModule):
         lr = self.hparams.lr
         wd = eval(self.config['wd'])
         opt = optim.AdamW(self.model.parameters(), lr=lr, weight_decay=wd)
-        return [opt]
+
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            opt, T_max=self.config['iterations'], eta_min=lr / 10
+        )
+
+        return {
+            "optimizer": opt,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "step"
+            }
+        }
 
     def optimizer_zero_grad(self, epoch, batch_idx, optimizer, optimizer_idx):
         optimizer.zero_grad(set_to_none=True)
@@ -115,6 +130,14 @@ class GeneratorModule(pl.LightningModule):
         data = batch
         im = data["true"]
         dirty_noisy = data["dirty_noisy"]
+
+        # 检查输入数据是否有NaN或Inf
+        if torch.isnan(im).any() or torch.isinf(im).any():
+            print(f"Warning: {stage} input 'im' contains NaN or Inf values")
+            im = torch.nan_to_num(im, nan=0.0, posinf=1e6, neginf=-1e6)
+        if torch.isnan(dirty_noisy).any() or torch.isinf(dirty_noisy).any():
+            print(f"Warning: {stage} input 'dirty_noisy' contains NaN or Inf values")
+            dirty_noisy = torch.nan_to_num(dirty_noisy, nan=0.0, posinf=1e6, neginf=-1e6)
 
         input = im
 
@@ -127,12 +150,24 @@ class GeneratorModule(pl.LightningModule):
             model_kwargs={},
         )
 
+        # 检查loss是否有NaN或Inf
+        for k, v in losses.items():
+            if torch.isnan(v).any() or torch.isinf(v).any():
+                print(f"Warning: {stage} loss '{k}' contains NaN or Inf values")
+                losses[k] = torch.nan_to_num(v, nan=0.0, posinf=1e6, neginf=-1e6)
+
         if isinstance(self.schedule_sampler, LossAwareSampler):
             self.schedule_sampler.update_with_local_losses(
                     t, losses['loss'].detach()
             )
 
         loss = (losses['loss'] * weights).mean()
+        
+        # 最终检查
+        if torch.isnan(loss) or torch.isinf(loss):
+            print(f"Error: {stage} final loss is NaN or Inf, replacing with 0.0")
+            loss = torch.tensor(0.0, device=loss.device, requires_grad=True)
+        
         res_dict = {f'{stage}/weighted_loss': loss}
         for k, v in losses.items():
             res_dict[f'{stage}/{k}'] = v.mean()

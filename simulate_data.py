@@ -1,6 +1,6 @@
-# CASA Simulation Script based on Table 1 parameters - 论文方法完整实现版
-# 基于论文A³COSMOS方法，使用SIMALMA和MSUVBIN完整模拟ALMA干涉数据
-# 兼容CASA 6.x
+# CASA Simulation Script based on Table 1 parameters - 修复版 + 详细调试
+# 解决dirty image维度问题和单值数组问题
+# 兼容旧版CASA (移除不支持的参数)
 
 import os
 import numpy as np
@@ -17,6 +17,7 @@ start_time = time.time()
 
 # 激活详细调试模式
 DEBUG = True
+total_source_count = 0  # 跟踪创建的总源数
 
 
 def debug_print(*args, **kwargs):
@@ -121,7 +122,7 @@ all_ra_dec = {}  # 改为字典格式，与样本一致
 all_sources_info = {}
 
 print("\n========== 开始ALMA模拟 ==========")
-print("使用论文Table 1参数配置")
+print("使用Table 1参数配置")
 
 # 设置Table 1参数
 field_name = "COSMOS"
@@ -137,7 +138,15 @@ total_time = "20min"
 hour_angle = "transit"
 
 # 为实际目的，限制模拟次数
-max_sims = 10  # 可根据需要调整模拟次数，论文使用9164次
+# max_sims = 10  # 可根据需要调整模拟次数
+
+# total_required_sims = 9164  # 论文中的总模拟数
+# empty_sim_count = 1000  # 无源模拟数
+total_required_sims = 5
+empty_sim_count = 5
+source_sim_count = total_required_sims - empty_sim_count  # 有源模拟数
+max_sims = total_required_sims  # 全部模拟数量
+
 print(f"计划执行 {max_sims} 次模拟")
 
 # 保存当前工作目录
@@ -145,8 +154,8 @@ original_dir = os.getcwd()
 debug_print(f"原始工作目录: {original_dir}")
 
 # 计算COSMOS场内合理的坐标范围（约1度范围）
-ra_base = 150.1192  # COSMOS 中心RA (J2000 10h00m28.6s)
-dec_base = 2.2058  # COSMOS 中心DEC (+02d12m21.0s)
+ra_base = 150.1192  # COSMOS 中心RA
+dec_base = 2.2058  # COSMOS 中心DEC
 debug_print(f"COSMOS场中心坐标: RA={ra_base}, DEC={dec_base}")
 
 # 运行模拟
@@ -184,10 +193,10 @@ for sim_idx in range(max_sims):
         cl.done()  # 清除任何已存在的列表
         debug_print("清除已有组件列表")
 
-        # 为每个模拟生成不同的相位中心，在COSMOS场内合理范围内
-        # 生成随机偏移量，范围约±0.5度，遵循论文中的1度范围
-        ra_offset = np.random.uniform(-0.5, 0.5)
-        dec_offset = np.random.uniform(-0.5, 0.5)
+        radius = np.random.uniform(0, 1.0)  # 随机半径，最大1度
+        angle = np.random.uniform(0, 2 * np.pi)  # 随机角度
+        ra_offset = radius * np.cos(angle)
+        dec_offset = radius * np.sin(angle)
 
         sim_ra = ra_base + ra_offset
         sim_dec = dec_base + dec_offset
@@ -203,23 +212,31 @@ for sim_idx in range(max_sims):
         print(f"使用相位中心: RA={sim_ra}, DEC={sim_dec}")
         debug_print(f"相位中心字符串: {sim_coords}")
 
-        # 随机生成1-5个源，确保至少有1个源 (与论文一致)
-        num_sources = np.random.randint(1, 6)
+        # 随机生成1-5个源，确保至少有1个源
+        create_empty_simulation = (sim_idx >= source_sim_count)
         sources_info = []
+
+        if create_empty_simulation:
+            print(f"创建空模拟（无射电源）")
+            num_sources = 0
+        else:
+            # 需要在~8164个有源模拟中生成~27,632个源
+            # 平均每个模拟~3.38个源
+            num_sources = np.random.randint(1, 7)  # 1-6个源，倾向于高端
+            print(f"生成 {num_sources} 个射电源")
 
         print(f"生成 {num_sources} 个射电源")
 
         for src_idx in range(num_sources):
-            # 生成随机源属性 - 遵循论文中参数
-            # 流量范围: 0.05-0.5 mJy (从论文中获取)
+            # 生成随机源属性 - 遵循表格中的参数
+            # 流量范围: 0.05-0.5 mJy (从表格中获取)
             flux = np.random.uniform(0.05, 0.5) / 1000.0  # 0.05-0.5 mJy 转换为 Jy
-
-            # 轴长范围: 0.4"-0.8" (接近或小于合成波束)
+            # 轴长范围: 0.4"-0.8" (从表格中获取)
             major_axis = np.random.uniform(0.4, 0.8)  # arcsec
             minor_axis = np.random.uniform(0.4, major_axis)  # arcsec
             pa = np.random.uniform(0, 360)  # degrees
 
-            # 随机位置在主波束内 (22.86" 从论文表格中获取)
+            # 随机位置在主波束内 (22.86" 从表格中获取)
             radius_arcsec = np.random.uniform(0, 22.86 / 2)
             angle_rad = np.random.uniform(0, 2 * np.pi)
 
@@ -231,12 +248,12 @@ for sim_idx in range(max_sims):
             ra = sim_ra + ra_src_offset
             dec = sim_dec + dec_src_offset
 
-            # 计算SNR（使用论文中的方法）
+            # 计算SNR（这里是简化估计）
             # 使用表格中的RMS噪声水平 ~50μJy/beam
             noise_level = 50e-6  # Jy/beam (50μJy)
             snr = flux / noise_level
 
-            # 归一化SNR（考虑源的大小）- 与论文方法一致
+            # 归一化SNR（考虑源的大小）
             beam_maj = 0.89  # arcsec - 表格中的合成波束大小
             beam_min = 0.82  # arcsec
             snr_normalized = snr * (beam_maj * beam_min) / np.sqrt(
@@ -280,138 +297,54 @@ for sim_idx in range(max_sims):
         os.chdir(data_dir)
         debug_print(f"切换工作目录到 {data_dir}")
 
-        # ========================= 无噪声模拟 =========================
-        # 首先创建一个无噪声的模拟 (用于生成真实的sky model)
-        noiseless_project = f"{project_name}_noiseless"
-        print("\n----- 执行无噪声ALMA模拟 (SIMALMA) -----")
+        # 添加PWV变化测试
+        # 在simobserve调用前添加:
+        testing_noise_effects = False  # 设置为True进行PWV测试运行
 
-        try:
-            # 使用SIMALMA进行无噪声模拟
-            simalma(
-                project=noiseless_project,
-                skymodel="",
-                complist=cl_file,
-                totaltime=total_time,
-                antennalist="alma.cycle5.3.cfg",  # 12-m array (与论文一致)
-                direction=sim_coords,
-                hourangle=hour_angle,
-                mapsize=["22.86arcsec"],  # 表格中的主波束大小
-                thermalnoise="",  # 无噪声
-                graphics="none",
-                overwrite=True,
-                indirection=sim_coords,
-                incell="0.1arcsec",  # 表格中的像素大小
-                incenter=central_freq,
-                inwidth=f"{total_bandwidth}MHz"
-            )
-        except Exception as e:
-            # 如果SIMALMA不可用或失败，回退到simobserve
-            log_error("SIMALMA失败，尝试使用simobserve", e)
-            simobserve(
-                project=noiseless_project,
-                skymodel="",
-                complist=cl_file,
-                setpointings=True,
-                integration=integration_time,
-                direction=sim_coords,
-                mapsize="22.86arcsec",  # 表格中的主波束大小
-                obsmode="int",
-                totaltime=total_time,
-                antennalist="alma.cycle5.3.cfg",
-                hourangle=hour_angle,
-                thermalnoise="",  # 无噪声
-                graphics="none",
-                incenter=central_freq,
-                inwidth=f"{total_bandwidth}MHz",
-                incell="0.1arcsec",  # 表格中的像素大小
-                overwrite=True
-            )
+        # 根据测试标志选择PWV值
+        if testing_noise_effects:
+            # 从论文测试值中采样
+            pwv_value = np.random.uniform(0.472, 5.186)  # 或使用特定值列表
+            print(f"噪声测试模式: PWV = {pwv_value}")
+        else:
+            pwv_value = 1.796  # 论文默认值
 
-        debug_print("无噪声模拟完成")
+        # 使用更合适的频谱设置进行模拟 - 使用模拟特定的相位中心
+        print("\n----- 执行simobserve -----")
+        simobserve(
+            project=project_name,
+            skymodel="",
+            complist=cl_file,
+            setpointings=True,
+            integration=integration_time,
+            direction=sim_coords,  # 使用模拟特定的相位中心
+            mapsize="51.2arcsec",  # 论文中指定的天空模型尺寸
+            obsmode="int",
+            totaltime=total_time,
+            antennalist="alma.cycle5.3.cfg",
+            hourangle=hour_angle,
+            thermalnoise="tsys-atm",
+            user_pwv=pwv_value,  # 表格中的PWV值
+            graphics="none",
+            incenter=central_freq,
+            inwidth=f"{total_bandwidth}MHz",
+            incell="0.1arcsec",  # 表格中的像素大小
+            overwrite=True
+        )
+        debug_print("simobserve完成")
 
-        # ========================= 有噪声模拟 =========================
-        # 然后创建带有噪声的模拟 (类似实际观测)
-        print("\n----- 执行带噪声ALMA模拟 (SIMALMA) -----")
-
-        try:
-            # 使用SIMALMA进行带噪声模拟 - 使用与论文相同的PWV值
-            simalma(
-                project=project_name,
-                skymodel="",
-                complist=cl_file,
-                totaltime=total_time,
-                antennalist="alma.cycle5.3.cfg",  # 12-m array (与论文一致)
-                pwv=1.796,  # 与论文表格一致
-                direction=sim_coords,
-                hourangle=hour_angle,
-                mapsize=["22.86arcsec"],  # 表格中的主波束大小
-                thermalnoise="tsys-atm",  # 添加热噪声
-                graphics="none",
-                overwrite=True,
-                indirection=sim_coords,
-                incell="0.1arcsec",  # 表格中的像素大小
-                incenter=central_freq,
-                inwidth=f"{total_bandwidth}MHz"
-            )
-        except Exception as e:
-            # 如果SIMALMA不可用或失败，回退到simobserve
-            log_error("SIMALMA失败，尝试使用simobserve", e)
-            simobserve(
-                project=project_name,
-                skymodel="",
-                complist=cl_file,
-                setpointings=True,
-                integration=integration_time,
-                direction=sim_coords,
-                mapsize="22.86arcsec",  # 表格中的主波束大小
-                obsmode="int",
-                totaltime=total_time,
-                antennalist="alma.cycle5.3.cfg",
-                hourangle=hour_angle,
-                thermalnoise="tsys-atm",
-                user_pwv=1.796,  # 表格中的PWV值
-                graphics="none",
-                incenter=central_freq,
-                inwidth=f"{total_bandwidth}MHz",
-                incell="0.1arcsec",  # 表格中的像素大小
-                overwrite=True
-            )
-
-        debug_print("带噪声模拟完成")
-
-        # 获取无噪声和有噪声模拟的MS文件路径
-        noiseless_project_dir = os.path.join(data_dir, noiseless_project)
+        # simobserve创建的项目目录和MS文件路径
         project_dir = os.path.join(data_dir, project_name)
-
-        noiseless_ms_file = ""
-        ms_file = ""
-
-        # 查找MS文件 - 考虑不同版本CASA生成的文件名可能不同
-        for possible_suffix in [".alma.cycle5.3.ms", ".alma.out.ms", ".ms"]:
-            if os.path.exists(os.path.join(noiseless_project_dir, f"{noiseless_project}{possible_suffix}")):
-                noiseless_ms_file = os.path.join(noiseless_project_dir, f"{noiseless_project}{possible_suffix}")
-                break
-
-        for possible_suffix in [".alma.cycle5.3.ms", ".alma.out.ms", ".ms"]:
-            if os.path.exists(os.path.join(project_dir, f"{project_name}{possible_suffix}")):
-                ms_file = os.path.join(project_dir, f"{project_name}{possible_suffix}")
-                break
-
-        if not noiseless_ms_file:
-            log_error(f"无法找到无噪声MS文件")
-        else:
-            debug_print(f"无噪声MS文件: {noiseless_ms_file}")
-
-        if not ms_file:
-            log_error(f"无法找到带噪声MS文件")
-        else:
-            debug_print(f"带噪声MS文件: {ms_file}")
+        ms_file = os.path.join(project_dir, f"{project_name}.alma.cycle5.3.ms")
 
         # 检查MS文件
         if not os.path.exists(ms_file):
-            raise FileNotFoundError(f"带噪声MS文件未创建: {ms_file}")
+            raise FileNotFoundError(f"MS文件未创建: {ms_file}")
 
-        # 显示带噪声MS文件的基本信息
+        ms_size = os.path.getsize(ms_file)
+        debug_print(f"MS文件大小: {ms_size} 字节")
+
+        # 显示MS文件的基本信息
         print("\n----- MS文件信息 -----")
         try:
             listobs(vis=ms_file)
@@ -430,69 +363,40 @@ for sim_idx in range(max_sims):
         except Exception as e:
             log_error("无法获取MS数据统计", e)
 
-        # =================== MSUVBIN - 网格化可见度 ===================
-        # 论文中提到使用MSUVBIN对可见度进行网格化
-        print("\n----- 使用MSUVBIN进行可见度网格化 -----")
-
-        try:
-            # 为带噪声MS文件创建网格化输出
-            noisy_uvgrid = os.path.join(project_dir, f"{project_name}_uvgrid.ms")
-            if os.path.exists(noisy_uvgrid):
-                os.system(f"rm -rf {noisy_uvgrid}")
-
-            msuvbin(
-                vis=ms_file,
-                outvis=noisy_uvgrid,
-                datacolumn="data",
-                mode="channel"
-            )
-            debug_print(f"带噪声可见度网格化完成: {noisy_uvgrid}")
-
-            # 为无噪声MS文件创建网格化输出
-            noiseless_uvgrid = os.path.join(noiseless_project_dir, f"{noiseless_project}_uvgrid.ms")
-            if os.path.exists(noiseless_uvgrid):
-                os.system(f"rm -rf {noiseless_uvgrid}")
-
-            msuvbin(
-                vis=noiseless_ms_file,
-                outvis=noiseless_uvgrid,
-                datacolumn="data",
-                mode="channel"
-            )
-            debug_print(f"无噪声可见度网格化完成: {noiseless_uvgrid}")
-
-            # 更新MS文件路径为网格化后的文件
-            ms_file = noisy_uvgrid
-            noiseless_ms_file = noiseless_uvgrid
-
-        except Exception as e:
-            log_error("MSUVBIN失败，使用原始MS文件继续", e)
-
-        # ========================= 生成Dirty Image =========================
-        print("\n----- 生成Dirty Image (带噪声) -----")
+        # 首先生成dirty image（不进行清洁）
+        print("\n----- 生成Dirty Image (不清洁) -----")
         dirty_imagename = os.path.join(project_dir, "dirty")
         debug_print(f"Dirty image将保存到: {dirty_imagename}")
 
         tclean(
             vis=ms_file,
             imagename=dirty_imagename,
-            imsize=[512, 512],  # 论文中的sky模型维度
-            cell="0.1arcsec",  # 论文中的像素大小
+            imsize=[512, 512],  # 表格中的sky模型维度
+            cell="0.1arcsec",  # 表格中的像素大小
             specmode="mfs",
-            weighting="natural",  # 论文中的加权方式
-            robust=0.5,  # 论文中的robust参数
+            weighting="natural",  # 表格中的加权方式
+            robust=0.5,  # 表格中的robust参数
             niter=0,  # 设置为0，只创建dirty image不进行清洁
             interactive=False,
-            savemodel='none'  # 不保存模型
+            savemodel='none',  # 不保存模型
+            gridder='standard'  # 使用标准网格器
         )
         debug_print("tclean (dirty) 完成")
 
         # 导出dirty image为FITS
-        dirty_image_file = dirty_imagename + ".image"
+        dirty_image_file = os.path.join(project_dir, "dirty.image")
         dirty_fits_file = os.path.join(project_dir, "dirty.fits")
 
         if not os.path.exists(dirty_image_file):
             raise FileNotFoundError(f"Dirty image文件未创建: {dirty_image_file}")
+
+        # 检查dirty image文件大小
+        dirty_size = os.path.getsize(dirty_image_file)
+        print(f"Dirty image文件大小: {dirty_size} 字节")
+
+        # 检查dirty image文件是否为空
+        if dirty_size < 1000:
+            print("警告: Dirty image文件异常小!")
 
         exportfits(
             imagename=dirty_image_file,
@@ -501,55 +405,20 @@ for sim_idx in range(max_sims):
         )
         debug_print(f"导出dirty image到FITS: {dirty_fits_file}")
 
-        # ========================= 生成Clean Image =========================
-        # 从无噪声数据生成真实sky model
-        print("\n----- 生成True Sky Model (无噪声CLEAN) -----")
-        true_imagename = os.path.join(noiseless_project_dir, "true")
-
-        tclean(
-            vis=noiseless_ms_file,
-            imagename=true_imagename,
-            imsize=[512, 512],  # 论文中的sky模型维度
-            cell="0.1arcsec",  # 论文中的像素大小
-            specmode="mfs",
-            deconvolver="hogbom",
-            weighting="natural",  # 论文中的加权方式
-            robust=0.5,  # 论文中的robust参数
-            niter=10000,  # 大量迭代以获得非常干净的图像
-            threshold="5uJy",  # 远低于噪声水平的阈值
-            interactive=False,
-            savemodel='modelcolumn'  # 保存模型到MS文件
-        )
-        debug_print("tclean (true) 完成")
-
-        # 导出true image为FITS
-        true_image_file = true_imagename + ".image"
-        true_fits_file = os.path.join(noiseless_project_dir, "true.fits")
-
-        if not os.path.exists(true_image_file):
-            raise FileNotFoundError(f"True image文件未创建: {true_image_file}")
-
-        exportfits(
-            imagename=true_image_file,
-            fitsimage=true_fits_file,
-            overwrite=True
-        )
-        debug_print(f"导出true image到FITS: {true_fits_file}")
-
-        # 从带噪声数据生成clean图像
-        print("\n----- 执行带噪声Clean成像 -----")
+        # 进行清洁成像
+        print("\n----- 执行Clean成像 -----")
         clean_imagename = os.path.join(project_dir, "clean")
         debug_print(f"Clean image将保存到: {clean_imagename}")
 
         tclean(
             vis=ms_file,
             imagename=clean_imagename,
-            imsize=[512, 512],  # 论文中的sky模型维度
-            cell="0.1arcsec",  # 论文中的像素大小
+            imsize=[512, 512],  # 表格中的sky模型维度
+            cell="0.1arcsec",  # 表格中的像素大小
             specmode="mfs",
             deconvolver="hogbom",
-            weighting="natural",  # 论文中的加权方式
-            robust=0.5,  # 论文中的robust参数
+            weighting="natural",  # 表格中的加权方式
+            robust=0.5,  # 表格中的robust参数
             niter=1000,
             threshold="50uJy",  # 表格中的RMS噪声水平
             interactive=False,
@@ -558,18 +427,22 @@ for sim_idx in range(max_sims):
         debug_print("tclean (clean) 完成")
 
         # 导出clean.image为FITS
-        clean_image_file = clean_imagename + ".image"
-        clean_fits_file = os.path.join(project_dir, "clean.fits")
+        image_file = os.path.join(project_dir, "clean.image")
+        fits_file = os.path.join(project_dir, "clean.fits")
 
-        if not os.path.exists(clean_image_file):
-            raise FileNotFoundError(f"Clean image文件未创建: {clean_image_file}")
+        if not os.path.exists(image_file):
+            raise FileNotFoundError(f"Clean image文件未创建: {image_file}")
+
+        # 检查clean image文件大小
+        clean_size = os.path.getsize(image_file)
+        print(f"Clean image文件大小: {clean_size} 字节")
 
         exportfits(
-            imagename=clean_image_file,
-            fitsimage=clean_fits_file,
+            imagename=image_file,
+            fitsimage=fits_file,
             overwrite=True
         )
-        debug_print(f"导出clean image到FITS: {clean_fits_file}")
+        debug_print(f"导出clean image到FITS: {fits_file}")
 
         # ========== 使用CASA原生工具处理图像 ==========
         print("\n----- 从CASA图像创建NumPy数组 -----")
@@ -577,27 +450,11 @@ for sim_idx in range(max_sims):
         # 确保CASA图像工具是可用的
         ia.done()  # 关闭之前可能打开的图像
 
-        # 1. 处理true图像 (无噪声清洁图像)
-        print(f"正在读取true图像: {true_image_file}")
-        ia.open(true_image_file)
-        true_image_2d = ia.getchunk()
-        # 如果图像有多个通道和偏振，只保留第一个通道和偏振
-        if len(true_image_2d.shape) > 2:
-            print(f"原始true图像形状: {true_image_2d.shape}, 提取第一个通道和偏振")
-            true_image_2d = true_image_2d[:, :, 0, 0]
-        ia.close()
+        # 1. 处理clean图像
+        clean_image_file = os.path.join(project_dir, "clean.image")
+        if not os.path.exists(clean_image_file):
+            raise FileNotFoundError(f"Clean image文件不存在: {clean_image_file}")
 
-        # 2. 处理dirty图像
-        print(f"正在读取dirty图像: {dirty_image_file}")
-        ia.open(dirty_image_file)
-        dirty_image_2d = ia.getchunk()
-        # 如果图像有多个通道和偏振，只保留第一个通道和偏振
-        if len(dirty_image_2d.shape) > 2:
-            print(f"原始dirty图像形状: {dirty_image_2d.shape}, 提取第一个通道和偏振")
-            dirty_image_2d = dirty_image_2d[:, :, 0, 0]
-        ia.close()
-
-        # 3. 处理clean图像 (仅用于验证，不保存)
         print(f"正在读取clean图像: {clean_image_file}")
         ia.open(clean_image_file)
         clean_image_2d = ia.getchunk()
@@ -607,40 +464,65 @@ for sim_idx in range(max_sims):
             clean_image_2d = clean_image_2d[:, :, 0, 0]
         ia.close()
 
+        # 2. 处理dirty图像
+        dirty_image_file = os.path.join(project_dir, "dirty.image")
+        if not os.path.exists(dirty_image_file):
+            raise FileNotFoundError(f"Dirty image文件不存在: {dirty_image_file}")
+
+        print(f"正在读取dirty图像: {dirty_image_file}")
+        ia.open(dirty_image_file)
+        dirty_image_2d = ia.getchunk()
+        # 如果图像有多个通道和偏振，只保留第一个通道和偏振
+        if len(dirty_image_2d.shape) > 2:
+            print(f"原始dirty图像形状: {dirty_image_2d.shape}, 提取第一个通道和偏振")
+            dirty_image_2d = dirty_image_2d[:, :, 0, 0]
+        ia.close()
+
         print("CASA图像成功转换为NumPy数组")
 
-        # 与论文方法一致，不使用掩膜，直接保存完整图像
-        print(f"True image形状: {true_image_2d.shape}")
-        print(
-            f"True image统计: 最小={np.min(true_image_2d):.3e}, 最大={np.max(true_image_2d):.3e}, 平均={np.mean(true_image_2d):.3e}")
-        print(f"Dirty image形状: {dirty_image_2d.shape}")
-        print(
-            f"Dirty image统计: 最小={np.min(dirty_image_2d):.3e}, 最大={np.max(dirty_image_2d):.3e}, 平均={np.mean(dirty_image_2d):.3e}")
+        # 3. 应用圆形掩膜 - 使结果与参考图像一致
+        print("应用圆形掩膜...")
+        y, x = np.ogrid[:512, :512]
+        center = 512/2
+        mask = (x - center)**2 + (y - center)**2 <= center**2
 
-        # 保存true image作为真实sky model
-        true_file = os.path.join(true_dir, f"{sim_idx:05d}.npy")
-        np.save(true_file, true_image_2d)  # 不使用掩膜，直接保存完整图像
-        print(f"保存True image到: {true_file}")
+        # 复制数组后应用掩膜
+        clean_image_masked = np.copy(clean_image_2d)
+        dirty_image_masked = np.copy(dirty_image_2d)
+
+        # 掩膜外区域设置为NaN
+        clean_image_masked[~mask] = np.nan
+        dirty_image_masked[~mask] = np.nan
+
+        print(f"Clean image形状: {clean_image_masked.shape}")
+        print(f"Clean image统计: 最小={np.nanmin(clean_image_masked):.3e}, 最大={np.nanmax(clean_image_masked):.3e}, 平均={np.nanmean(clean_image_masked):.3e}")
+        print(f"Dirty image形状: {dirty_image_masked.shape}")
+        print(f"Dirty image统计: 最小={np.nanmin(dirty_image_masked):.3e}, 最大={np.nanmax(dirty_image_masked):.3e}, 平均={np.nanmean(dirty_image_masked):.3e}")
+
+        # 保存clean image (true)
+        clean_file = os.path.join(true_dir, f"{sim_idx:05d}.npy")
+        np.save(clean_file, clean_image_masked)
+        print(f"保存Clean image到: {clean_file}")
 
         # 保存dirty image
         dirty_file = os.path.join(dirty_dir, f"{sim_idx:05d}.npy")
-        np.save(dirty_file, dirty_image_2d)  # 不使用掩膜，直接保存完整图像
+        np.save(dirty_file, dirty_image_masked)
         print(f"保存Dirty image到: {dirty_file}")
 
         # 检查文件大小
-        true_npy_size = os.path.getsize(true_file)
+        clean_npy_size = os.path.getsize(clean_file)
         dirty_npy_size = os.path.getsize(dirty_file)
-        print(f"True NPY文件大小: {true_npy_size} 字节")
+        print(f"Clean NPY文件大小: {clean_npy_size} 字节")
         print(f"Dirty NPY文件大小: {dirty_npy_size} 字节")
 
         # 最终验证文件
         try:
             print("\n----- 验证保存的文件 -----")
-            test_true = np.load(true_file)
-            print(f"读取True image: 形状={test_true.shape}, 最小={np.min(test_true)}, 最大={np.max(test_true)}")
+            test_clean = np.load(clean_file)
+            print(f"读取Clean image: 形状={test_clean.shape}, 最小={np.nanmin(test_clean)}, 最大={np.nanmax(test_clean)}")
 
             test_dirty = np.load(dirty_file)
-            print(f"读取Dirty image: 形状={test_dirty.shape}, 最小={np.min(test_dirty)}, 最大={np.max(test_dirty)}")
+            print(f"读取Dirty image: 形状={test_dirty.shape}, 最小={np.nanmin(test_dirty)}, 最大={np.nanmax(test_dirty)}")
 
         except Exception as e:
             log_error("验证保存的文件时出错", e)
@@ -649,6 +531,7 @@ for sim_idx in range(max_sims):
         sim_duration = sim_end - sim_start
         print(f"\n模拟 {sim_idx + 1} 完成，用时 {sim_duration:.2f} 秒")
         sim_success += 1
+        total_source_count += num_sources
 
     except Exception as e:
         sim_end = time.time()
@@ -684,10 +567,11 @@ print(f"成功模拟: {sim_success}/{max_sims}")
 print(f"失败模拟: {sim_failed}/{max_sims}")
 print(f"输出目录: {base_dir}")
 print(f"数据文件位于: {data_dir}")
-print(f"True images 位于: {true_dir}")
+print(f"Clean images (true) 位于: {true_dir}")
 print(f"Dirty images 位于: {dirty_dir}")
 print(f"其他NumPy数组位于: {numpy_dir}")
 print(f"日志文件: {log_file}")
+print(f"创建的总射电源数: {total_source_count} (目标: 27,632)")
 print("========== 模拟完成 ==========")
 
 # 关闭日志文件
