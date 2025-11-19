@@ -37,8 +37,8 @@ latent:
     max_channels: 256
 
 dataset:
-#  image_path: /home/ldingaj/dataset/radio_images
-  image_path: D:\datasets\radio_images
+  image_path: /home/ldingaj/dataset/radio_images
+#  image_path: D:\datasets\radio_images
   label_path:
   size: 512
   n_classes:

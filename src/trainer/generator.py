@@ -243,10 +243,12 @@ class GeneratorModule(pl.LightningModule):
         # 检查输入数据是否有NaN或Inf
         if torch.isnan(im).any() or torch.isinf(im).any():
             print(f"Warning: {stage} input 'im' contains NaN or Inf values")
-            im = torch.nan_to_num(im, nan=0.0, posinf=1e6, neginf=-1e6)
+            im = torch.nan_to_num(im, nan=0.0, posinf=10.0, neginf=-10.0)
+            im = torch.clamp(im, -10, 10)
         if torch.isnan(dirty_noisy).any() or torch.isinf(dirty_noisy).any():
             print(f"Warning: {stage} input 'dirty_noisy' contains NaN or Inf values")
-            dirty_noisy = torch.nan_to_num(dirty_noisy, nan=0.0, posinf=1e6, neginf=-1e6)
+            dirty_noisy = torch.nan_to_num(dirty_noisy, nan=0.0, posinf=10.0, neginf=-10.0)
+            dirty_noisy = torch.clamp(dirty_noisy, -10, 10)
 
         input = im
 
@@ -279,7 +281,8 @@ class GeneratorModule(pl.LightningModule):
         for k, v in losses.items():
             if torch.isnan(v).any() or torch.isinf(v).any():
                 print(f"Warning: {stage} loss '{k}' contains NaN or Inf values")
-                losses[k] = torch.nan_to_num(v, nan=0.0, posinf=1e6, neginf=-1e6)
+                losses[k] = torch.nan_to_num(v, nan=0.0, posinf=100.0, neginf=-100.0)
+                losses[k] = torch.clamp(losses[k], -100, 100)
 
         if isinstance(self.schedule_sampler, LossAwareSampler):
             self.schedule_sampler.update_with_local_losses(
@@ -308,7 +311,13 @@ class GeneratorModule(pl.LightningModule):
                 res_dict[f'{stage}/kl_per_sample'] = kl_per_sample.mean().detach()
             if kl_per_dim is not None:
                 res_dict[f'{stage}/kl_per_dim'] = kl_per_dim.mean().detach()
-        self.log_dict(res_dict)
+        
+        # 在训练时显示在进度条上
+        if stage == 'train':
+            self.log_dict(res_dict, prog_bar=True, logger=True, on_step=True, on_epoch=True)
+        else:
+            self.log_dict(res_dict, prog_bar=False, logger=True, on_step=False, on_epoch=True)
+        
         return total_loss
 
     def training_step(self, batch, batch_idx: int) -> torch.Tensor:

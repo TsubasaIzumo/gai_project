@@ -5,23 +5,34 @@ from tensorboard.backend.event_processing import event_accumulator
 from datetime import datetime
 
 
-def convert_tensorboard_to_txt(log_dir, output_file=None):
+def convert_tensorboard_to_txt(log_path, output_file=None):
     """
     Convert TensorBoard logs to txt format
     
     Args:
-        log_dir: TensorBoard log directory path (directory containing events files)
+        log_path: TensorBoard log directory path or events file path
         output_file: Output txt file path, if None then auto-generated
     """
-    # Find events files
-    events_files = glob.glob(os.path.join(log_dir, "events.out.tfevents.*"))
-    if not events_files:
-        print(f"No events files found in {log_dir}")
-        return None
-    
-    # Use the latest events file
-    events_file = max(events_files, key=os.path.getmtime)
-    print(f"Loading events file: {events_file}")
+    # 判断是文件还是目录
+    if os.path.isfile(log_path):
+        # 如果是文件，直接使用该文件
+        events_file = os.path.abspath(log_path)
+        log_dir = os.path.dirname(events_file)
+        # 如果 log_dir 为空（相对文件名），使用当前目录
+        if not log_dir:
+            log_dir = os.getcwd()
+        print(f"Using events file: {events_file}")
+    else:
+        # 如果是目录，查找events文件
+        log_dir = os.path.abspath(log_path)
+        events_files = glob.glob(os.path.join(log_dir, "events.out.tfevents.*"))
+        if not events_files:
+            print(f"No events files found in {log_dir}")
+            return None
+        
+        # Use the latest events file
+        events_file = max(events_files, key=os.path.getmtime)
+        print(f"Loading events file: {events_file}")
     
     # Load event file
     ea = event_accumulator.EventAccumulator(log_dir)
@@ -37,7 +48,12 @@ def convert_tensorboard_to_txt(log_dir, output_file=None):
     
     # Generate output filename
     if output_file is None:
-        log_name = os.path.basename(os.path.dirname(log_dir))
+        if os.path.isfile(log_path):
+            # 如果输入是文件，输出文件放在同一目录
+            log_name = os.path.basename(os.path.dirname(log_dir))
+        else:
+            # 如果输入是目录
+            log_name = os.path.basename(os.path.dirname(log_dir))
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_file = os.path.join(log_dir, f"training_log_{log_name}_{timestamp}.txt")
     
@@ -78,15 +94,15 @@ def convert_tensorboard_to_txt(log_dir, output_file=None):
     return output_file
 
 
-def read_training_log(log_dir=None, output_file=None):
+def read_training_log(log_path=None, output_file=None):
     """
     Read training log and convert to txt format
     
     Args:
-        log_dir: TensorBoard log directory, if None then find the latest one
+        log_path: TensorBoard log directory or file path, if None then find the latest one
         output_file: Output file path
     """
-    if log_dir is None:
+    if log_path is None:
         # Find the latest log directory
         log_base = "lightning_logs"
         if not os.path.exists(log_base):
@@ -104,25 +120,25 @@ def read_training_log(log_dir=None, output_file=None):
             return None
         
         # Use the latest directory
-        log_dir = max(version_dirs, key=lambda x: os.path.getmtime(x))
-        print(f"Using latest log directory: {log_dir}")
+        log_path = max(version_dirs, key=lambda x: os.path.getmtime(x))
+        print(f"Using latest log directory: {log_path}")
     
-    return convert_tensorboard_to_txt(log_dir, output_file)
+    return convert_tensorboard_to_txt(log_path, output_file)
 
 
 if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="Convert TensorBoard logs to txt format")
-    parser.add_argument("--log_dir", type=str, default=None, 
-                       help="TensorBoard log directory path (directory containing events files)")
+    parser.add_argument("log_path", type=str, nargs='?', default=None,
+                       help="TensorBoard log directory or events file path (optional)")
     parser.add_argument("--output", type=str, default=None,
                        help="Output txt file path (optional, auto-generated if not specified)")
     args = parser.parse_args()
     
-    # If log_dir is provided, use it; otherwise use the latest log
-    if args.log_dir:
-        convert_tensorboard_to_txt(args.log_dir, args.output)
+    # If log_path is provided, use it; otherwise use the latest log
+    if args.log_path:
+        convert_tensorboard_to_txt(args.log_path, args.output)
     else:
         # Use the latest log directory
         read_training_log(output_file=args.output)
