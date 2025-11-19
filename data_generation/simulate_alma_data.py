@@ -1,6 +1,8 @@
-# CASA Simulation Script based on Table 1 parameters - 修复版 + 详细调试
-# 解决dirty image维度问题和单值数组问题
-# 兼容旧版CASA (移除不支持的参数)
+# CASA Simulation Script aligned to DDPM training data approach
+# - 以TCLEAN (niter=0) 生成dirty image作为条件输入
+# - Band-6 (230 GHz), 240 channels @ 7.8 MHz (MFS成像)
+# - COSMOS中心周围 1 度半径内相位中心随机采样
+# - 512x512 @ 0.1"/pix → 51.2" 视场
 
 import os
 import numpy as np
@@ -15,14 +17,9 @@ import traceback
 # 开始时间戳，用于计算总运行时间
 start_time = time.time()
 
-# 激活详细调试模式
-DEBUG = True
-
-
-def debug_print(*args, **kwargs):
-    if DEBUG:
-        print("DEBUG:", *args, **kwargs)
-        sys.stdout.flush()  # 确保立即显示
+# 固定随机种子以保证可重复性
+RNG_SEED = 20251111
+np.random.seed(RNG_SEED)
 
 
 # 错误处理函数
@@ -31,13 +28,13 @@ def log_error(msg, e=None):
     if e:
         print(f"Exception: {type(e).__name__}: {str(e)}")
         traceback.print_exc()
-    sys.stdout.flush()  # 确保立即显示
+    sys.stdout.flush()
 
 
 # 检查CASA版本 - 轻量级方式
 print("\n========== CASA环境检查 ==========")
 try:
-    # 尝试获取CASA版本信息的多种方式
+    # 尝试获取CASA版本信息
     casa_version = "未知"
     try:
         import casac
@@ -55,7 +52,6 @@ try:
 
     print(f"CASA状态: {casa_version}")
     print(f"工作目录: {os.getcwd()}")
-    print("CASA环境检查完成")
 except Exception as e:
     print(f"注意: CASA环境检查跳过: {str(e)}")
 
@@ -63,15 +59,16 @@ except Exception as e:
 base_dir = os.path.expanduser("~/data/casa_workspace/simulated_data")
 print(f"使用基本目录: {base_dir}")
 
-# 创建数据和numpy子目录
-data_dir = os.path.join(base_dir, "data")
+# 创建最小必要的目录
 numpy_dir = os.path.join(base_dir, "numpy_arrays")
 true_dir = os.path.join(numpy_dir, "true")
 dirty_dir = os.path.join(numpy_dir, "dirty")
+temp_dir = os.path.join(base_dir, "temp")  # 临时工作目录
 log_dir = os.path.join(base_dir, "logs")
+checkpoint_dir = os.path.join(base_dir, "checkpoints")
 
 # 确保目录存在
-for directory in [base_dir, data_dir, numpy_dir, true_dir, dirty_dir, log_dir]:
+for directory in [base_dir, numpy_dir, true_dir, dirty_dir, temp_dir, log_dir, checkpoint_dir]:
     if not os.path.exists(directory):
         os.makedirs(directory)
         print(f"创建目录: {directory}")
@@ -81,10 +78,8 @@ timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 log_file = os.path.join(log_dir, f"simulation_log_{timestamp}.txt")
 print(f"日志将保存至: {log_file}")
 
+
 # 设置日志记录
-import sys
-
-
 class Logger(object):
     def __init__(self, filename):
         self.terminal = sys.stdout
@@ -104,30 +99,111 @@ class Logger(object):
 # 启用日志记录
 sys.stdout = Logger(log_file)
 
-print("\n========== 清理之前的模拟结果 ==========")
-for directory in [data_dir, numpy_dir, true_dir, dirty_dir]:
-    if os.path.exists(directory):
-        for item in os.listdir(directory):
-            item_path = os.path.join(directory, item)
-            if os.path.isfile(item_path):
-                os.remove(item_path)
-                debug_print(f"删除文件: {item_path}")
 
-# 存储所有模拟的sky_keys和ra_dec信息
-all_sky_keys = []
-all_ra_dec = {}  # 改为字典格式，与样本一致
+# 清理临时目录
+def cleanup_temp_dir():
+    """清理临时目录中的所有文件"""
+    if os.path.exists(temp_dir):
+        for item in os.listdir(temp_dir):
+            item_path = os.path.join(temp_dir, item)
+            try:
+                if os.path.isfile(item_path):
+                    os.remove(item_path)
+                elif os.path.isdir(item_path):
+                    shutil.rmtree(item_path)
+            except Exception as e:
+                print(f"清理文件失败: {item_path} - {str(e)}")
+    print("临时目录已清理")
 
-# 存储所有射电源信息的字典
-all_sources_info = {}
 
-print("\n========== 开始ALMA模拟 ==========")
-print("使用Table 1参数配置")
+# 断点重连功能：检查是否存在检查点
+checkpoint_file = os.path.join(checkpoint_dir, "checkpoint.pkl")
+if os.path.exists(checkpoint_file):
+    print("\n========== 发现检查点，尝试恢复状态 ==========")
+    try:
+        with open(checkpoint_file, 'rb') as f:
+            checkpoint_data = pickle.load(f)
 
-# 设置Table 1参数
+        all_sky_keys = checkpoint_data.get('all_sky_keys', [])
+        all_ra_dec = checkpoint_data.get('all_ra_dec', {})
+        all_sources_info = checkpoint_data.get('all_sources_info', {})
+        start_sim_idx = checkpoint_data.get('next_sim_idx', 0)
+        sim_success = checkpoint_data.get('sim_success', 0)
+        sim_failed = checkpoint_data.get('sim_failed', 0)
+
+        print(f"从检查点恢复: 已完成 {start_sim_idx} 次模拟，成功 {sim_success}，失败 {sim_failed}")
+        print(
+            f"已存在 {len(all_sky_keys)} 个sky_keys，{len(all_ra_dec)} 个ra_dec条目，{len(all_sources_info)} 个sources_info条目")
+    except Exception as e:
+        print(f"无法加载检查点，将从头开始: {str(e)}")
+        all_sky_keys = []
+        all_ra_dec = {}
+        all_sources_info = {}
+        start_sim_idx = 0
+        sim_success = 0
+        sim_failed = 0
+else:
+    print("\n========== 未找到检查点，从头开始 ==========")
+    all_sky_keys = []
+    all_ra_dec = {}
+    all_sources_info = {}
+    start_sim_idx = 0
+    sim_success = 0
+    sim_failed = 0
+
+# 清理临时目录
+cleanup_temp_dir()
+
+# 指向数优先复现实验规模
+num_pointings_with_sources = 9164
+target_total_sources = 27632
+num_blank_images = 1000
+
+# 计算每幅图的源数分配（≥1）并使总和精确等于 target_total_sources
+lambda_per_image = target_total_sources / num_pointings_with_sources
+initial_sources_per_image = np.random.poisson(lam=lambda_per_image, size=num_pointings_with_sources)
+# 将0重采样为≥1
+zeros_idx = np.where(initial_sources_per_image == 0)[0]
+if zeros_idx.size > 0:
+    initial_sources_per_image[zeros_idx] = 1
+
+current_sum = int(np.sum(initial_sources_per_image))
+delta = target_total_sources - current_sum
+
+if delta > 0:
+    # 需要增加 delta 个源：随机选择 delta 个指向并 +1
+    inc_idx = np.random.choice(num_pointings_with_sources, size=delta, replace=True)
+    for idx in inc_idx:
+        initial_sources_per_image[idx] += 1
+elif delta < 0:
+    # 需要减少 -delta 个源：在值>1的指向上 -1（必要时允许多次循环）
+    delta = -delta
+    dec_candidates = np.where(initial_sources_per_image > 1)[0].tolist()
+    while delta > 0 and dec_candidates:
+        idx = np.random.choice(dec_candidates)
+        initial_sources_per_image[idx] -= 1
+        delta -= 1
+        if initial_sources_per_image[idx] == 1:
+            dec_candidates.remove(idx)
+
+# 再次确认总和
+assert int(np.sum(initial_sources_per_image)) == target_total_sources, "源数配额未精确匹配目标总源数"
+
+# 构造最终每次模拟的源数计划：前 9164 为含源，后 1000 为无源
+per_sim_num_sources = initial_sources_per_image.tolist() + [0] * num_blank_images
+max_sims = len(per_sim_num_sources)
+print(f"计划执行 {max_sims} 次模拟（含源 {num_pointings_with_sources}，无源 {num_blank_images}）")
+
+# 保存当前工作目录
+original_dir = os.getcwd()
+
+# 计算COSMOS场中心（用于1度范围采样）
+ra_base = 150.1192  # COSMOS 中心RA
+dec_base = 2.2058  # COSMOS 中心DEC
+
+# 设置模拟参数
 field_name = "COSMOS"
 field_coords = "J2000 10h00m28.6s +02d12m21.0s"
-num_pointings = 9164
-num_antennas = 50
 central_freq = "230GHz"  # Band 6
 channel_width = 7.8  # MHz
 num_channels = 240
@@ -135,59 +211,79 @@ total_bandwidth = channel_width * num_channels  # MHz
 integration_time = "10s"
 total_time = "20min"
 hour_angle = "transit"
+primary_beam_arcsec = 22.86  # 主波束直径（用于源位置范围）
+cell_arcsec = 0.1
+imsize_pixels = 512
+fov_arcsec = imsize_pixels * cell_arcsec  # 51.2"
 
-# 为实际目的，限制模拟次数
-max_sims = 1000  # 可根据需要调整模拟次数
-print(f"计划执行 {max_sims} 次模拟")
 
-# 保存当前工作目录
-original_dir = os.getcwd()
-debug_print(f"原始工作目录: {original_dir}")
+# 函数：保存检查点
+def save_checkpoint(idx, sky_keys, ra_dec_dict, sources_info, success, failed):
+    checkpoint_data = {
+        'all_sky_keys': sky_keys,
+        'all_ra_dec': ra_dec_dict,
+        'all_sources_info': sources_info,
+        'next_sim_idx': idx,
+        'sim_success': success,
+        'sim_failed': failed,
+        'timestamp': datetime.now().strftime("%Y%m%d_%H%M%S")
+    }
 
-# 计算COSMOS场内合理的坐标范围（约1度范围）
-ra_base = 150.1192  # COSMOS 中心RA
-dec_base = 2.2058  # COSMOS 中心DEC
-debug_print(f"COSMOS场中心坐标: RA={ra_base}, DEC={dec_base}")
+    # 保存检查点
+    checkpoint_file = os.path.join(checkpoint_dir, "checkpoint.pkl")
+    with open(checkpoint_file, 'wb') as f:
+        pickle.dump(checkpoint_data, f)
+
+    # 同时保存当前的输出文件
+    np.save(os.path.join(numpy_dir, "sky_keys.npy"), np.array(sky_keys))
+    with open(os.path.join(numpy_dir, "ra_dec.npy"), 'wb') as f:
+        pickle.dump(ra_dec_dict, f)
+    with open(os.path.join(numpy_dir, "sky_sources_snr_extended.npy"), 'wb') as f:
+        pickle.dump(sources_info, f)
+
+    print(f"\n========== 已保存检查点 {idx}/{max_sims} ==========")
+    print(f"成功: {success}, 失败: {failed}, 数据时间: {checkpoint_data['timestamp']}")
+
 
 # 运行模拟
-sim_success = 0
-sim_failed = 0
+print("\n========== 开始ALMA模拟 ==========")
+print(f"从第 {start_sim_idx + 1}/{max_sims} 个模拟开始")
 
-for sim_idx in range(max_sims):
+for sim_idx in range(start_sim_idx, max_sims):
     print(f"\n========== 运行模拟 {sim_idx + 1}/{max_sims} ==========")
     sim_start = time.time()
 
     try:
-        # 项目名称 - 只使用名称，不包含路径
+        # 确保临时目录清理干净
+        cleanup_temp_dir()
+
+        # 切换到临时目录
+        os.chdir(temp_dir)
+
+        planned_num_sources = int(per_sim_num_sources[sim_idx])
+
+        # 项目名称
         project_name = f"sim_{timestamp}_{sim_idx}"
-        debug_print(f"项目名称: {project_name}")
 
         # 创建UUID格式的sky_key并保存
         sky_key = str(uuid.uuid4())
         all_sky_keys.append(sky_key)
-        debug_print(f"Sky key: {sky_key}")
-
-        # 确保数据目录存在
-        if not os.path.exists(data_dir):
-            os.makedirs(data_dir)
-            debug_print(f"创建数据目录: {data_dir}")
 
         # 创建组件列表路径
-        cl_file = os.path.join(data_dir, f"{project_name}.cl")
-        debug_print(f"组件列表文件: {cl_file}")
+        cl_file = os.path.join(temp_dir, f"{project_name}.cl")
 
         # 确保组件列表不存在
         if os.path.exists(cl_file):
-            os.system(f"rm -rf {cl_file}")
-            debug_print(f"删除已存在的组件列表文件: {cl_file}")
+            os.remove(cl_file)
 
         cl.done()  # 清除任何已存在的列表
-        debug_print("清除已有组件列表")
 
-        # 为每个模拟生成不同的相位中心，在COSMOS场内合理范围内
-        # 生成随机偏移量，范围约±0.5度
-        ra_offset = np.random.uniform(-0.6, 0.6)
-        dec_offset = np.random.uniform(-0.6, 0.6)
+        # 为每个模拟生成不同的相位中心：在COSMOS中心1°半径内极坐标均匀采样
+        radius_deg = np.sqrt(np.random.uniform(0.0, 1.0)) * 1.0  # 均匀面积采样，最大1度
+        theta = np.random.uniform(0.0, 2.0 * np.pi)
+        dec_scale = np.cos(np.deg2rad(dec_base))
+        ra_offset = (radius_deg * np.cos(theta)) / max(dec_scale, 1e-6)
+        dec_offset = radius_deg * np.sin(theta)
 
         sim_ra = ra_base + ra_offset
         sim_dec = dec_base + dec_offset
@@ -201,54 +297,40 @@ for sim_idx in range(max_sims):
         all_ra_dec[sky_key] = {'RA': sim_ra, 'DEC': sim_dec}
 
         print(f"使用相位中心: RA={sim_ra}, DEC={sim_dec}")
-        debug_print(f"相位中心字符串: {sim_coords}")
 
-        # 随机生成1-5个源，确保至少有1个源
-        num_sources = np.random.randint(1, 6)
+        # 按计划生成源数量
+        num_sources = planned_num_sources
         sources_info = []
 
         print(f"生成 {num_sources} 个射电源")
 
         for src_idx in range(num_sources):
-            # 生成随机源属性 - 遵循表格中的参数
-            # 流量范围: 0.05-0.5 mJy (从表格中获取)
-            flux = np.random.uniform(0.05, 0.5) / 1000.0  # 0.05-0.5 mJy 转换为 Jy
-            # 轴长范围: 0.4"-0.8" (从表格中获取)
+            # 生成随机源属性
+            flux = np.random.uniform(0.05, 0.5) / 1000.0  # 0.05-0.5 mJy → Jy
             major_axis = np.random.uniform(0.4, 0.8)  # arcsec
             minor_axis = np.random.uniform(0.4, major_axis)  # arcsec
             pa = np.random.uniform(0, 360)  # degrees
 
-            # 随机位置在主波束内 (22.86" 从表格中获取)
-            radius_arcsec = np.random.uniform(0, 22.86 / 2)
+            radius_arcsec = np.random.uniform(0, primary_beam_arcsec / 2)
             angle_rad = np.random.uniform(0, 2 * np.pi)
 
-            # 转换为RA/DEC偏移
-            ra_src_offset = radius_arcsec * np.cos(angle_rad) / 3600.0  # 转换arcsec到度
+            ra_src_offset = radius_arcsec * np.cos(angle_rad) / 3600.0  # arcsec → deg
             dec_src_offset = radius_arcsec * np.sin(angle_rad) / 3600.0
 
-            # 计算源的实际RA和DEC
             ra = sim_ra + ra_src_offset
             dec = sim_dec + dec_src_offset
 
-            # 计算SNR（这里是简化估计）
-            # 使用表格中的RMS噪声水平 ~50μJy/beam
-            noise_level = 50e-6  # Jy/beam (50μJy)
+            noise_level = 50e-6  # Jy/beam
             snr = flux / noise_level
 
-            # 归一化SNR（考虑源的大小）
-            beam_maj = 0.89  # arcsec - 表格中的合成波束大小
+            beam_maj = 0.89  # arcsec（示意）
             beam_min = 0.82  # arcsec
             snr_normalized = snr * (beam_maj * beam_min) / np.sqrt(
                 (beam_maj ** 2 + major_axis ** 2) * (beam_min ** 2 + minor_axis ** 2))
 
-            # 修正：为每个源创建正确的坐标字符串
             ra_src_hms = f"{int(ra / 15)}h{int((ra / 15 % 1) * 60):02d}m{((ra / 15 % 1) * 60 % 1) * 60:.1f}s"
             dec_src_dms = f"{'+' if dec >= 0 else '-'}{abs(int(dec))}d{int(abs(dec) % 1 * 60):02d}m{(abs(dec) % 1 * 60 % 1) * 60:.1f}s"
             src_coords = f"J2000 {ra_src_hms} {dec_src_dms}"
-
-            # 使用源的实际坐标
-            debug_print(f"源 {src_idx + 1} 坐标: {src_coords}, 流量: {flux} Jy")
-            debug_print(f"源 {src_idx + 1} 属性: 长轴={major_axis}arcsec, 短轴={minor_axis}arcsec, PA={pa}度")
 
             cl.addcomponent(
                 dir=src_coords,
@@ -260,26 +342,33 @@ for sim_idx in range(max_sims):
                 minoraxis=f"{minor_axis}arcsec",
                 positionangle=f"{pa}deg",
                 spectrumtype="spectral index",
-                index=0  # 表格中的谱指数为0
+                index=0
             )
 
             print(f"添加源于 {src_coords} 流量 {flux} Jy")
 
             sources_info.append([ra, dec, snr, snr_normalized, flux, major_axis, minor_axis])
 
-        # 保存组件列表
+        # 无源样本：添加极弱虚拟源以保证simobserve运行
+        if num_sources == 0:
+            cl.addcomponent(
+                dir=sim_coords,
+                flux=1e-12,
+                fluxunit="Jy",
+                freq=central_freq,
+                shape="point",
+                spectrumtype="spectral index",
+                index=0
+            )
+            print("无源样本：添加极弱虚拟源以保证simobserve运行")
+
         cl.rename(cl_file)
         cl.done()
-        debug_print(f"组件列表已保存到 {cl_file}")
 
         # 保存射电源信息
         all_sources_info[sky_key] = sources_info
 
-        # 切换到数据目录
-        os.chdir(data_dir)
-        debug_print(f"切换工作目录到 {data_dir}")
-
-        # 使用更合适的频谱设置进行模拟 - 使用模拟特定的相位中心
+        # 执行simobserve
         print("\n----- 执行simobserve -----")
         simobserve(
             project=project_name,
@@ -287,174 +376,93 @@ for sim_idx in range(max_sims):
             complist=cl_file,
             setpointings=True,
             integration=integration_time,
-            direction=sim_coords,  # 使用模拟特定的相位中心
-            mapsize="22.86arcsec",  # 表格中的主波束大小
+            direction=sim_coords,
+            mapsize=f"{fov_arcsec}arcsec",
             obsmode="int",
             totaltime=total_time,
             antennalist="alma.cycle5.3.cfg",
             hourangle=hour_angle,
             thermalnoise="tsys-atm",
-            user_pwv=1.796,  # 表格中的PWV值
+            user_pwv=1.796,
             graphics="none",
             incenter=central_freq,
             inwidth=f"{total_bandwidth}MHz",
-            incell="0.1arcsec",  # 表格中的像素大小
+            incell=f"{cell_arcsec}arcsec",
             overwrite=True
         )
-        debug_print("simobserve完成")
 
-        # simobserve创建的项目目录和MS文件路径
-        project_dir = os.path.join(data_dir, project_name)
+        # 获取MS文件路径
+        project_dir = os.path.join(temp_dir, project_name)
         ms_file = os.path.join(project_dir, f"{project_name}.alma.cycle5.3.ms")
 
-        # 检查MS文件
         if not os.path.exists(ms_file):
             raise FileNotFoundError(f"MS文件未创建: {ms_file}")
 
-        ms_size = os.path.getsize(ms_file)
-        debug_print(f"MS文件大小: {ms_size} 字节")
-
-        # 显示MS文件的基本信息
-        print("\n----- MS文件信息 -----")
-        try:
-            listobs(vis=ms_file)
-        except Exception as e:
-            log_error("listobs失败", e)
-
-        # 统计是否有足够的数据点
-        try:
-            ms.open(ms_file)
-            ms_data = ms.getdata(['data'])
-            data_shape = ms_data['data'].shape
-            print(f"MS数据形状: {data_shape}")
-            data_points = np.prod(data_shape)
-            print(f"数据点总数: {data_points}")
-            ms.close()
-        except Exception as e:
-            log_error("无法获取MS数据统计", e)
-
-        # 首先生成dirty image（不进行清洁）
+        # 生成Dirty Image
         print("\n----- 生成Dirty Image (不清洁) -----")
         dirty_imagename = os.path.join(project_dir, "dirty")
-        debug_print(f"Dirty image将保存到: {dirty_imagename}")
 
         tclean(
             vis=ms_file,
             imagename=dirty_imagename,
-            imsize=[512, 512],  # 表格中的sky模型维度
-            cell="0.1arcsec",  # 表格中的像素大小
+            imsize=[imsize_pixels, imsize_pixels],
+            cell=f"{cell_arcsec}arcsec",
             specmode="mfs",
-            weighting="natural",  # 表格中的加权方式
-            robust=0.5,  # 表格中的robust参数
-            niter=0,  # 设置为0，只创建dirty image不进行清洁
+            weighting="natural",
+            niter=0,
             interactive=False,
-            savemodel='none',  # 不保存模型
-            gridder='standard'  # 使用标准网格器
+            savemodel='none',
+            gridder='standard'
         )
-        debug_print("tclean (dirty) 完成")
 
-        # 导出dirty image为FITS
-        dirty_image_file = os.path.join(project_dir, "dirty.image")
-        dirty_fits_file = os.path.join(project_dir, "dirty.fits")
-
-        if not os.path.exists(dirty_image_file):
-            raise FileNotFoundError(f"Dirty image文件未创建: {dirty_image_file}")
-
-        # 检查dirty image文件大小
-        dirty_size = os.path.getsize(dirty_image_file)
-        print(f"Dirty image文件大小: {dirty_size} 字节")
-
-        # 检查dirty image文件是否为空
-        if dirty_size < 1000:
-            print("警告: Dirty image文件异常小!")
-
-        exportfits(
-            imagename=dirty_image_file,
-            fitsimage=dirty_fits_file,
-            overwrite=True
-        )
-        debug_print(f"导出dirty image到FITS: {dirty_fits_file}")
-
-        # 进行清洁成像
+        # 执行Clean成像
         print("\n----- 执行Clean成像 -----")
         clean_imagename = os.path.join(project_dir, "clean")
-        debug_print(f"Clean image将保存到: {clean_imagename}")
 
         tclean(
             vis=ms_file,
             imagename=clean_imagename,
-            imsize=[512, 512],  # 表格中的sky模型维度
-            cell="0.1arcsec",  # 表格中的像素大小
+            imsize=[imsize_pixels, imsize_pixels],
+            cell=f"{cell_arcsec}arcsec",
             specmode="mfs",
             deconvolver="hogbom",
-            weighting="natural",  # 表格中的加权方式
-            robust=0.5,  # 表格中的robust参数
+            weighting="natural",
             niter=1000,
-            threshold="50uJy",  # 表格中的RMS噪声水平
+            threshold="50uJy",
             interactive=False,
-            savemodel='modelcolumn'  # 保存模型到MS文件
+            savemodel='modelcolumn'
         )
-        debug_print("tclean (clean) 完成")
 
-        # 导出clean.image为FITS
-        image_file = os.path.join(project_dir, "clean.image")
-        fits_file = os.path.join(project_dir, "clean.fits")
-
-        if not os.path.exists(image_file):
-            raise FileNotFoundError(f"Clean image文件未创建: {image_file}")
-
-        # 检查clean image文件大小
-        clean_size = os.path.getsize(image_file)
-        print(f"Clean image文件大小: {clean_size} 字节")
-
-        exportfits(
-            imagename=image_file,
-            fitsimage=fits_file,
-            overwrite=True
-        )
-        debug_print(f"导出clean image到FITS: {fits_file}")
-
-        # ========== 使用CASA原生工具处理图像 ==========
+        # 从CASA图像创建NumPy数组并直接保存到最终目录
         print("\n----- 从CASA图像创建NumPy数组 -----")
-
-        # 确保CASA图像工具是可用的
         ia.done()  # 关闭之前可能打开的图像
 
-        # 1. 处理clean图像
+        # 处理clean图像
         clean_image_file = os.path.join(project_dir, "clean.image")
         if not os.path.exists(clean_image_file):
-            raise FileNotFoundError(f"Clean image文件不存在: {clean_image_file}")
+            raise FileNotFoundError(f"Clean image文件未创建: {clean_image_file}")
 
-        print(f"正在读取clean图像: {clean_image_file}")
         ia.open(clean_image_file)
         clean_image_2d = ia.getchunk()
-        # 如果图像有多个通道和偏振，只保留第一个通道和偏振
         if len(clean_image_2d.shape) > 2:
-            print(f"原始clean图像形状: {clean_image_2d.shape}, 提取第一个通道和偏振")
             clean_image_2d = clean_image_2d[:, :, 0, 0]
         ia.close()
 
-        # 2. 处理dirty图像
+        # 处理dirty图像
         dirty_image_file = os.path.join(project_dir, "dirty.image")
         if not os.path.exists(dirty_image_file):
-            raise FileNotFoundError(f"Dirty image文件不存在: {dirty_image_file}")
+            raise FileNotFoundError(f"Dirty image文件未创建: {dirty_image_file}")
 
-        print(f"正在读取dirty图像: {dirty_image_file}")
         ia.open(dirty_image_file)
         dirty_image_2d = ia.getchunk()
-        # 如果图像有多个通道和偏振，只保留第一个通道和偏振
         if len(dirty_image_2d.shape) > 2:
-            print(f"原始dirty图像形状: {dirty_image_2d.shape}, 提取第一个通道和偏振")
             dirty_image_2d = dirty_image_2d[:, :, 0, 0]
         ia.close()
 
-        print("CASA图像成功转换为NumPy数组")
-
-        # 3. 应用圆形掩膜 - 使结果与参考图像一致
-        print("应用圆形掩膜...")
-        y, x = np.ogrid[:512, :512]
-        center = 512/2
-        mask = (x - center)**2 + (y - center)**2 <= center**2
+        # 应用圆形掩膜
+        y, x = np.ogrid[:imsize_pixels, :imsize_pixels]
+        center = imsize_pixels / 2
+        mask = (x - center) ** 2 + (y - center) ** 2 <= center ** 2
 
         # 复制数组后应用掩膜
         clean_image_masked = np.copy(clean_image_2d)
@@ -465,9 +473,7 @@ for sim_idx in range(max_sims):
         dirty_image_masked[~mask] = np.nan
 
         print(f"Clean image形状: {clean_image_masked.shape}")
-        print(f"Clean image统计: 最小={np.nanmin(clean_image_masked):.3e}, 最大={np.nanmax(clean_image_masked):.3e}, 平均={np.nanmean(clean_image_masked):.3e}")
         print(f"Dirty image形状: {dirty_image_masked.shape}")
-        print(f"Dirty image统计: 最小={np.nanmin(dirty_image_masked):.3e}, 最大={np.nanmax(dirty_image_masked):.3e}, 平均={np.nanmean(dirty_image_masked):.3e}")
 
         # 保存clean image (true)
         clean_file = os.path.join(true_dir, f"{sim_idx:05d}.npy")
@@ -479,28 +485,17 @@ for sim_idx in range(max_sims):
         np.save(dirty_file, dirty_image_masked)
         print(f"保存Dirty image到: {dirty_file}")
 
-        # 检查文件大小
-        clean_npy_size = os.path.getsize(clean_file)
-        dirty_npy_size = os.path.getsize(dirty_file)
-        print(f"Clean NPY文件大小: {clean_npy_size} 字节")
-        print(f"Dirty NPY文件大小: {dirty_npy_size} 字节")
-
-        # 最终验证文件
-        try:
-            print("\n----- 验证保存的文件 -----")
-            test_clean = np.load(clean_file)
-            print(f"读取Clean image: 形状={test_clean.shape}, 最小={np.nanmin(test_clean)}, 最大={np.nanmax(test_clean)}")
-
-            test_dirty = np.load(dirty_file)
-            print(f"读取Dirty image: 形状={test_dirty.shape}, 最小={np.nanmin(test_dirty)}, 最大={np.nanmax(test_dirty)}")
-
-        except Exception as e:
-            log_error("验证保存的文件时出错", e)
+        # 清理本次模拟的临时文件
+        cleanup_temp_dir()
 
         sim_end = time.time()
         sim_duration = sim_end - sim_start
         print(f"\n模拟 {sim_idx + 1} 完成，用时 {sim_duration:.2f} 秒")
         sim_success += 1
+
+        # 每500次模拟保存一次检查点
+        if (sim_idx + 1) % 500 == 0 or sim_idx == max_sims - 1:
+            save_checkpoint(sim_idx + 1, all_sky_keys, all_ra_dec, all_sources_info, sim_success, sim_failed)
 
     except Exception as e:
         sim_end = time.time()
@@ -508,24 +503,31 @@ for sim_idx in range(max_sims):
         log_error(f"模拟 {sim_idx + 1} 失败，用时 {sim_duration:.2f} 秒", e)
         sim_failed += 1
 
-# 保存sky_keys.npy
+        # 失败后清理临时文件
+        try:
+            cleanup_temp_dir()
+        except:
+            pass
+
+        # 失败后也保存检查点
+        if (sim_idx + 1) % 500 == 0:
+            save_checkpoint(sim_idx + 1, all_sky_keys, all_ra_dec, all_sources_info, sim_success, sim_failed)
+
+# 恢复原始工作目录
+os.chdir(original_dir)
+
+# 保存最终结果
 print("\n========== 保存最终结果 ==========")
 np.save(os.path.join(numpy_dir, "sky_keys.npy"), np.array(all_sky_keys))
 print(f"保存sky_keys.npy，包含 {len(all_sky_keys)} 个keys")
 
-# 保存ra_dec.npy - 保存为字典，与样本一致
 with open(os.path.join(numpy_dir, "ra_dec.npy"), 'wb') as f:
     pickle.dump(all_ra_dec, f)
 print(f"保存ra_dec.npy，包含 {len(all_ra_dec)} 个条目")
 
-# 保存射电源信息
 with open(os.path.join(numpy_dir, "sky_sources_snr_extended.npy"), 'wb') as f:
     pickle.dump(all_sources_info, f)
 print(f"保存sky_sources_snr_extended.npy，包含 {len(all_sources_info)} 个条目")
-
-# 恢复原始工作目录
-os.chdir(original_dir)
-print(f"恢复工作目录到 {original_dir}")
 
 # 总结
 end_time = time.time()
@@ -535,11 +537,6 @@ print(f"总运行时间: {total_time:.2f} 秒")
 print(f"成功模拟: {sim_success}/{max_sims}")
 print(f"失败模拟: {sim_failed}/{max_sims}")
 print(f"输出目录: {base_dir}")
-print(f"数据文件位于: {data_dir}")
-print(f"Clean images (true) 位于: {true_dir}")
-print(f"Dirty images 位于: {dirty_dir}")
-print(f"其他NumPy数组位于: {numpy_dir}")
-print(f"日志文件: {log_file}")
 print("========== 模拟完成 ==========")
 
 # 关闭日志文件

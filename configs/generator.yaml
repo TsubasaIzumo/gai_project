@@ -1,7 +1,7 @@
 batch_size: 11 #22
 n_workers: 16
-#iterations: 20000000
-iterations: 10000
+iterations: 20000000
+#iterations: 10000
 eval_every: 1
 accumulate_grad_batches: 1
 fp16: False
@@ -19,10 +19,28 @@ model:
   use_y_conditioning: False
   diffusion_steps: 1000
 
+latent:
+  enabled: True
+  dim: 32
+  project_channels: 16
+  beta_max: 0.1
+  beta_warmup_steps: 1000
+  free_bits: 0.0
+  prior_freeze_steps: 0
+  prior:
+    base_channels: 32
+    num_layers: 3
+    max_channels: 256
+  encoder:
+    base_channels: 32
+    num_layers: 3
+    max_channels: 256
+
 dataset:
-  image_path: D:\datasets\radio_images\D1 #D1 - 1-5 radio sources
+#  image_path: /home/ldingaj/dataset/radio_images
+  image_path: D:\datasets\radio_images
   label_path:
-  size: 128
+  size: 512
   n_classes:
   n_channels: 1
   from_uv: False
@@ -31,4 +49,4 @@ dataset:
   use_zeros: True
 
 
-comment: formal_run_with_early_stopping_scheduler
+comment: local_run_with_VI

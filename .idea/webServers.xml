@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="WebServers">
+    <option name="servers">
+      <webServer id="3ecfdc03-7b2f-4fb0-b57c-4a4d107ef272" name="superpod.ust.hk">
+        <fileTransfer rootFolder="/home/ldingaj/project/gai/diffusion-for-sources-characterisation" accessType="SFTP" host="superpod.ust.hk" port="22" sshConfigId="d848c4d8-142c-4056-bfab-3c5f5a24f775" sshConfig="ldingaj@superpod.ust.hk:22 password">
+          <advancedOptions>
+            <advancedOptions dataProtectionLevel="Private" keepAliveTimeout="0" passiveMode="true" shareSSLContext="true" />
+          </advancedOptions>
+        </fileTransfer>
+      </webServer>
+    </option>
+  </component>
+</project>

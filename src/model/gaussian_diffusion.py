@@ -243,11 +243,21 @@ class GaussianDiffusion:
         """
         if model_kwargs is None:
             model_kwargs = {}
+        else:
+            model_kwargs = dict(model_kwargs)
 
         B, C = x.shape[:2]
         assert t.shape == (B,)
 
-        model_output = model(th.cat([x, cond], dim=1), self._scale_timesteps(t), **model_kwargs)
+        latent = model_kwargs.pop("latent", None)
+        inputs = [x]
+        if cond is not None:
+            inputs.append(cond)
+        if latent is not None:
+            inputs.append(latent)
+        model_input = th.cat(inputs, dim=1)
+
+        model_output = model(model_input, self._scale_timesteps(t), **model_kwargs)
 
         if self.model_var_type in [ModelVarType.LEARNED, ModelVarType.LEARNED_RANGE]:
             assert model_output.shape == (B, C * 2, *x.shape[2:])
@@ -749,6 +759,8 @@ class GaussianDiffusion:
         """
         if model_kwargs is None:
             model_kwargs = {}
+        else:
+            model_kwargs = dict(model_kwargs)
         if noise is None:
             noise = th.randn_like(x_start)
         x_t = self.q_sample(x_start, t, noise=noise)
@@ -768,7 +780,15 @@ class GaussianDiffusion:
             if self.loss_type == LossType.RESCALED_KL:
                 terms["loss"] *= self.num_timesteps
         elif self.loss_type == LossType.MSE or self.loss_type == LossType.RESCALED_MSE:
-            model_output = model(th.cat([x_t, cond], dim=1), self._scale_timesteps(t), **model_kwargs)
+            latent = model_kwargs.pop("latent", None)
+            inputs = [x_t]
+            if cond is not None:
+                inputs.append(cond)
+            if latent is not None:
+                inputs.append(latent)
+            model_input = th.cat(inputs, dim=1)
+
+            model_output = model(model_input, self._scale_timesteps(t), **model_kwargs)
 
             if self.model_var_type in [
                 ModelVarType.LEARNED,
