@@ -231,7 +231,8 @@ class GeneratorModule(pl.LightningModule):
             }
         }
 
-    def optimizer_zero_grad(self, epoch, batch_idx, optimizer, optimizer_idx):
+    def optimizer_zero_grad(self, epoch, batch_idx, optimizer, optimizer_idx=0):
+        """Override to use set_to_none=True for better performance"""
         optimizer.zero_grad(set_to_none=True)
 
     def step(self, batch, batch_idx: int, *, stage: str) -> torch.Tensor:
@@ -317,6 +318,7 @@ class GeneratorModule(pl.LightningModule):
         return self.step(batch, batch_idx, stage='val')
 
     def on_train_batch_start(self, batch, batch_idx, dataloader_idx=0):
+        """Unfreeze prior network after specified steps"""
         if (
             self.latent_enabled
             and self.prior_freeze_steps > 0
@@ -325,12 +327,23 @@ class GeneratorModule(pl.LightningModule):
         ):
             self._set_prior_requires_grad(True)
             self._prior_frozen = False
+            # Only print on main process in multi-GPU training
+            if self.trainer.is_global_zero:
+                print(f"Unfreezing prior network at step {self.global_step}")
 
-    def on_after_backward(self) -> None:
+    def on_train_batch_end(self, outputs, batch, batch_idx, dataloader_idx=0):
+        """Update EMA after each training batch"""
         self._update_ema()
 
+    def on_after_backward(self) -> None:
+        """Called after backward pass - kept for compatibility"""
+        pass
+
     def _update_ema(self) -> None:
-        update_ema(self.model_ema.parameters(), self.model.parameters(), rate=self.ema_rate)
+        """Update EMA model parameters"""
+        # Only update EMA during training, not validation
+        if self.training:
+            update_ema(self.model_ema.parameters(), self.model.parameters(), rate=self.ema_rate)
 
     def forward(
         self,

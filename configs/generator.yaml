@@ -49,4 +49,4 @@ dataset:
   use_zeros: True
 
 
-comment: local_run_with_VI
+comment: test_run_VI

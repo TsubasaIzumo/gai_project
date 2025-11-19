@@ -5,15 +5,10 @@ import yaml
 
 import pytorch_lightning as pl
 from pytorch_lightning import loggers as pl_loggers
-from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint, EarlyStopping
+from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 
 from src.trainer import GeneratorModule
 from src.utils import get_config
-from src.model import init_weights
-#
-# import warnings
-# warnings.filterwarnings("ignore", message=".*'pretrained' is deprecated.*")
-# warnings.filterwarnings("ignore", message=".*'weights' are deprecated.*")
 
 
 def main(args) -> None:
@@ -21,8 +16,6 @@ def main(args) -> None:
     config = get_config(config_path)
     auto_lr = args.auto_lr
     auto_bs = args.auto_bs
-    num_gpus = args.gpus
-    strategy = args.strategy
 
     now = datetime.now()
     date_time = now.strftime("%Y-%m-%d-%H-%M-%S")
@@ -40,53 +33,20 @@ def main(args) -> None:
     callback_best_ckpt = ModelCheckpoint(every_n_val_epochs=1, filename='best_{epoch}_{step}', monitor='val/weighted_loss',
                                          mode='min')
 
-    path_checkpoint = config['fine_tune_from']
-
-    early_stop_callback = EarlyStopping(
-        monitor='val/weighted_loss',
-        min_delta=0.00,
-        patience=10,  # 10个评估周期没有改善就停止
-        verbose=True,
-        mode='min'
-    )
-
-    # 配置多GPU训练策略
-    trainer_kwargs = {
-        'logger': logger,
-        'callbacks': [
-            callback_lr,
-            callback_last_ckpt,
-            callback_best_ckpt,
-            early_stop_callback
-        ],
-        'auto_select_gpus': True,
-        'auto_scale_batch_size': auto_bs,
-        'max_steps': iterations,
-        'check_val_every_n_epoch': eval_every,
-        'precision': precision,
-        'accumulate_grad_batches': accumulate_grad_batches,
-        'resume_from_checkpoint': path_checkpoint,
-    }
-    
-    # 根据GPU数量配置训练策略
-    if num_gpus > 1:
-        # 多GPU训练：使用DDP策略
-        if strategy is None:
-            # 自动选择策略：Linux/Mac使用ddp，Windows使用ddp_spawn
-            import platform
-            if platform.system() == 'Windows':
-                strategy = 'ddp_spawn'
-            else:
-                strategy = 'ddp'
-        trainer_kwargs['devices'] = num_gpus
-        trainer_kwargs['strategy'] = strategy
-        print(f"使用 {num_gpus} 个GPU进行训练，策略: {strategy}")
-    else:
-        # 单GPU训练
-        trainer_kwargs['devices'] = 1
-        print("使用单GPU进行训练")
-    
-    trainer = pl.Trainer(**trainer_kwargs)
+    trainer = pl.Trainer(logger=logger,
+                         callbacks=[
+                             callback_lr,
+                             callback_last_ckpt,
+                             callback_best_ckpt
+                         ],
+                         gpus=-1,
+                         auto_select_gpus=True,
+                         auto_scale_batch_size=auto_bs,
+                         max_steps=iterations,
+                         check_val_every_n_epoch=eval_every,
+                         # strategy='ddp',
+                         precision=precision,
+                         accumulate_grad_batches=accumulate_grad_batches)
 
     if auto_lr:
         lr_finder = trainer.tuner.lr_find(module, min_lr=1e-5, max_lr=1e-1,)
@@ -98,7 +58,7 @@ def main(args) -> None:
     trainer.tune(module)
 
     # checkpoint
-    # trainer.fit(module, load_from_checkpoint=path_checkpoint)
+    path_checkpoint = config['fine_tune_from']
     trainer.fit(module)
 
     # save config to file
@@ -112,7 +72,5 @@ if __name__ == '__main__':
     parser.add_argument('--config', type=str, default='./configs/generator.yaml', help='path to config file')
     parser.add_argument('--auto_bs', action='store_true', help='auto select batch size')
     parser.add_argument('--auto_lr', action='store_true', help='auto select learning rate')
-    parser.add_argument('--gpus', type=int, default=1, help='number of GPUs to use (default: 1)')
-    parser.add_argument('--strategy', type=str, default=None, help='distributed strategy: ddp, ddp_spawn, etc. (auto-detected if not specified)')
     args = parser.parse_args()
     main(args)
