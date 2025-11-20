@@ -5,7 +5,7 @@ import yaml
 
 import pytorch_lightning as pl
 from pytorch_lightning import loggers as pl_loggers
-from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
+from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint, EarlyStopping
 
 from src.trainer import GeneratorModule
 from src.utils import get_config
@@ -28,17 +28,41 @@ def main(args) -> None:
     eval_every = config['eval_every']
 
     module = GeneratorModule(config, config['fp16'])
-    callback_lr = LearningRateMonitor('step')
-    callback_last_ckpt = ModelCheckpoint(every_n_val_epochs=1, filename='last_{epoch}_{step}')
-    callback_best_ckpt = ModelCheckpoint(every_n_val_epochs=1, filename='best_{epoch}_{step}', monitor='val/weighted_loss',
-                                         mode='min')
+    
+    # 构建 callbacks 列表
+    callbacks = [
+        LearningRateMonitor('step'),
+        ModelCheckpoint(every_n_val_epochs=1, filename='last_{epoch}_{step}'),
+        ModelCheckpoint(
+            every_n_val_epochs=1, 
+            filename='best_{epoch}_{step}', 
+            monitor='val/weighted_loss',
+            mode='min'
+        )
+    ]
+    
+    # 根据配置文件决定是否添加 early stopping
+    early_stop_config = config.get('early_stopping', {})
+    if early_stop_config.get('enabled', False):
+        callback_early_stop = EarlyStopping(
+            monitor=early_stop_config.get('monitor', 'val/weighted_loss'),
+            patience=early_stop_config.get('patience', 10),
+            mode='min',
+            verbose=True,
+            min_delta=early_stop_config.get('min_delta', 0.001),
+        )
+        callbacks.append(callback_early_stop)
+        print(f"✓ Early Stopping enabled - patience={early_stop_config.get('patience', 10)}, "
+              f"monitor={early_stop_config.get('monitor', 'val/weighted_loss')}")
+    
+    # 获取checkpoint路径
+    path_checkpoint = config.get('fine_tune_from', None)
+    if path_checkpoint:
+        print(f"Resume from checkpoint: {path_checkpoint}")
 
     trainer = pl.Trainer(logger=logger,
-                         callbacks=[
-                             callback_lr,
-                             callback_last_ckpt,
-                             callback_best_ckpt
-                         ],
+                         callbacks=callbacks,
+                         resume_from_checkpoint=path_checkpoint,
                          gpus=-1,
                          auto_select_gpus=True,
                          auto_scale_batch_size=auto_bs,
@@ -55,10 +79,10 @@ def main(args) -> None:
         module.hparams.lr = lr
         config['lr_suggested'] = lr
 
-    trainer.tune(module)
+    if auto_bs:
+        trainer.tune(module)
 
-    # checkpoint
-    path_checkpoint = config['fine_tune_from']
+    # 开始训练
     trainer.fit(module)
 
     # save config to file

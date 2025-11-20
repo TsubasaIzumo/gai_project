@@ -8,6 +8,13 @@ fp16: False
 clip_denoised: True
 ema_rate: 0.999
 
+# Early Stopping 配置
+early_stopping:
+  enabled: True              # 是否启用 early stopping
+  patience: 10               # 容忍多少个验证周期没有改善
+  min_delta: 0.001          # 最小改善阈值
+  monitor: val/weighted_loss # 监控的指标
+
 lr: 1e-4
 wd: "0"
 
