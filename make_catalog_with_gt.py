@@ -531,7 +531,6 @@ class PredictedCatalog:
         self.power = self._extract_power_from_folder_name()
 
         self.generated_images = []
-        self.images = []
         self.sky_indexes = []
         self.noisy_input = []
         self.sky_keys = []
@@ -572,36 +571,70 @@ class PredictedCatalog:
         reordered_array = np.reshape(reshaped_array, (N, *im_shape))
 
         return reordered_array
+    
+    def _load_and_preprocess_true_image(self, sky_index):
+        """
+        Load and preprocess the true image from dataset folder with the same preprocessing as training.
+        
+        Args:
+            sky_index: Index of the sky image to load
+            
+        Returns:
+            Preprocessed image array (same format as training data)
+        """
+        try:
+            true_file = os.path.join(self.true_folder, self.noisy_im_filenames[sky_index])
+            if os.path.exists(true_file):
+                true = np.load(true_file)[np.newaxis, ...]
+            else:
+                true = np.zeros((1, 512, 512))
+        except:
+            true = np.zeros((1, 512, 512))
+        
+        # Apply the same preprocessing as in SkaDataset.__getitem__
+        const = 0.00002960064
+        true = true / const
+        true = np.abs(true)
+        true = (true) ** (1. / self.power)
+        true = np.nan_to_num(true, nan=0.0, posinf=10.0, neginf=-10.0)
+        true = np.clip(true, -10, 10)
+        true = (true - 0.5) / 0.5
+        
+        # Convert to torch tensor and interpolate to target size
+        sky_model = torch.from_numpy(true).float()
+        sky_model = torch.clamp(sky_model, -10, 10)
+        
+        # Interpolate to target image size
+        preprocessed = torch.nn.functional.interpolate(
+            sky_model.unsqueeze(0),
+            mode="bicubic",
+            size=(self.image_size, self.image_size)
+        )[0]
+        
+        # Convert back to numpy and return as (H, W) array
+        preprocessed = preprocessed.squeeze(0).numpy()
+        return preprocessed
+    
     def load_data(self):
         if self.runs_per_sample != -1:
             batch_numbers = self._compute_batch_nbs()
             for i in batch_numbers:
                 line=f"batch={i}_"
                 test_generated_images_i = np.load(f"{self.folder}/{line}{self.partition}_generated_images.npy")
-                test_images_i = np.load(f"{self.folder}/{line}{self.partition}_images.npy")
                 sky_indexes_i = np.load(f"{self.folder}/{line}{self.partition}_sky_indexes.npy")
                 noisy_input_i = np.load(f"{self.folder}/{line}{self.partition}_dirty_noisy.npy")
 
                 test_generated_images_i = self.reorder_repeated(test_generated_images_i,)
-                test_images_i = self.reorder_repeated(test_images_i,)
                 sky_indexes_i = self.reorder_repeated(sky_indexes_i,)
                 noisy_input_i = self.reorder_repeated(noisy_input_i,)
 
                 self.generated_images.append(test_generated_images_i)
-                self.images.append(test_images_i)
                 self.sky_indexes.append(sky_indexes_i)
                 self.noisy_input.append(noisy_input_i)
 
             self.generated_images = np.concatenate(self.generated_images)
-            self.images = np.concatenate(self.images)
             self.sky_indexes = np.concatenate(self.sky_indexes)
             self.noisy_input = np.concatenate(self.noisy_input)
-
-        else:
-            self.generated_images = np.load(f"{folder}/{partition}_generated_images.npy")
-            self.images = np.load(f"{folder}/{partition}_images.npy")
-            self.sky_indexes = np.load(f"{folder}/{partition}_gt_sources.npy")
-            self.noisy_input = np.load(f"{folder}/{partition}_dirty_noisy.npy")
 
         self.sky_keys = np.load(f"{self.dataset_folder}/sky_keys.npy")
         self.phase_dict = np.load(f"{self.dataset_folder}/ra_dec.npy", allow_pickle=True).item()
@@ -615,8 +648,6 @@ class PredictedCatalog:
         # ra, dec, SNR, SNR normalized, flux, major, minor
         self.snr_extended = np.load(f"{self.dataset_folder}/sky_sources_snr_extended.npy", allow_pickle=True).item()
         self.additional_line=""
-
-        self.generated_images = self.images
 
     def load_header(self, key):
         # our basic train val and test sets. All headers are saved separately as pickle objects
@@ -659,12 +690,12 @@ class PredictedCatalog:
         try:
             key = self.sky_keys[sky_index]
             true_sources = np.array(self.snr_extended[key])
-            im = np.load(self.true_folder + "/" + self.noisy_im_filenames[sky_index])
-            im = np.nan_to_num(im)
+            # Load and preprocess true image with the same preprocessing as training
+            im = self._load_and_preprocess_true_image(sky_index)
         except:
             key = None
             true_sources = []
-            im = np.zeros((512,512))
+            im = np.zeros((self.image_size, self.image_size))
 
         noisy_im = im_reshape(self.noisy_input[i])  # np.load(noisy_folder + "/" + noisy_im_filenames[sky_index])
         repeat_images = self.runs_per_sample
@@ -748,7 +779,9 @@ class PredictedCatalog:
             if sources_from_generated is not None:
                 sources_from_generated_all_runs.append(sources_from_generated)
 
-            reconstruction_metrics_generated = compute_reconstruction_metrics_from_im(gen_im_astro, im, power=self.runs_per_sample)
+            # Convert preprocessed true image back to original physical units for comparison
+            im_astro = true_itrasnform(im, self.power)
+            reconstruction_metrics_generated = compute_reconstruction_metrics_from_im(gen_im_astro, im_astro, power=self.power)
             reconstruction_metrics_generated = reconstruction_metrics_generated + [j, ]
             reconstruction_metrics_generated_all_runs.append(reconstruction_metrics_generated)
 
@@ -775,7 +808,9 @@ class PredictedCatalog:
         if sources_from_generated is not None:
             sources_from_generated_all_runs.append(sources_from_generated)
 
-        reconstruction_metrics_generated = compute_reconstruction_metrics_from_im(gen_im_astro, im, verbose=False, power=self.runs_per_sample)
+        # Convert preprocessed true image back to original physical units for comparison
+        im_astro = true_itrasnform(im, self.power)
+        reconstruction_metrics_generated = compute_reconstruction_metrics_from_im(gen_im_astro, im_astro, verbose=False, power=self.power)
         reconstruction_metrics_generated = reconstruction_metrics_generated + [-1, ]
         reconstruction_metrics_generated_all_runs.append(reconstruction_metrics_generated)
         reconstruction_metrics_generated_all_runs = np.array(reconstruction_metrics_generated_all_runs)
@@ -801,15 +836,17 @@ class PredictedCatalog:
 
 
         if verbose or visualization:
+            # Convert preprocessed true image back to original physical units for visualization
+            im_astro = true_itrasnform(im, self.power)
             plot_generated_images(
-                true_trasnform(im, self.power),
+                true_trasnform(im_astro, self.power),
                 true_trasnform(gen_im_astro, self.power),
                 noisy_im,
                 uncertainty,
                 sources=[sources_from_true_pix, sources_from_generated_pix, gt_sources],
                 # sources=[gt_sources*gen_im.shape[1]/512, sources_from_true, gt_sources],
                 save_fig=save_fig,
-                save_name=f"{save_folder}/sample_{partition}_{i}{additional_line}.png",
+                save_name=f"{save_folder}/sample_{self.partition}_{i}{self.additional_line}.png",
             )
             print("=============================================================================================")
         if len(sources_from_generated_all_runs) > 0:
@@ -842,7 +879,7 @@ class PredictedCatalog:
 
         data = {}
 
-        for i in tqdm.tqdm(range(0, len(self.images), self.runs_per_sample)):  #
+        for i in tqdm.tqdm(range(0, len(self.generated_images), self.runs_per_sample)):  #
             data = self.run_test_experiment(
                 i,
                 nb_sources,
