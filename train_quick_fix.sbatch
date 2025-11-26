@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=astro_test             # 作业名称
+#SBATCH --job-name=quick_fix             # 作业名称
 #SBATCH --nodes=1                         # 使用1个节点
 #SBATCH --gpus=1                          # 请求1块GPU
 #SBATCH --time=12:00:00                   # 最长运行10分钟
@@ -34,7 +34,7 @@ python -c "import sys; print('RUN PY:', sys.executable)"
 python -m pip show pytorch-lightning || true
 python -m pip show lightning || true
 
-python train_generator.py --config configs/generator.yaml
+python train_generator.py --config configs/generator_fixed.yaml
 
 # python generate_images_realizations.py \
 #     --ckpt "/home/ldingaj/project/gai/diffusion-for-sources-characterisation/lightning_logs/2025-11-20-04-06-12_test_run_VI/version_0/checkpoints/best_epoch=27_step=12935.ckpt" \

@@ -35,8 +35,13 @@ python -m pip show pytorch-lightning || true
 python -m pip show lightning || true
 
 python generate_images_realizations.py \
-    --ckpt "/home/ldingaj/project/gai/diffusion-for-sources-characterisation/lightning_logs/2025-11-20-04-06-12_test_run_VI/version_0/checkpoints/best_epoch=27_step=12935.ckpt" \
+    --config "./configs/generator_fixed.yaml" \
+    --ckpt "/home/ldingaj/project/gai/diffusion-for-sources-characterisation/lightning_logs/2025-11-22-11-51-23_conditional_prior_fixed_quickfix/version_0/checkpoints/best_epoch=41_step=19403.ckpt" \
     --output "./results/generated_images" \
-    --bs 5 \
     --timestep_respacing 250 \
-    --runs_per_sample 10
+    --guidance_scale 7.0 \
+    --bs 5 \
+    --runs_per_sample 10 \
+    --latent_enabled True \
+    --latent_dim 32 \
+    --latent_project_channels 4

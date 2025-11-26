@@ -11,7 +11,7 @@ print(reconstructed.shape)
 
 reconstructed_list = np.load("batch=0_val_generated_images.npy").tolist()
 print(len(reconstructed_list))
-image = reconstructed_list[49]
+image = reconstructed_list[0]
 # print(image)
 plt.figure(figsize=(8, 8))
 plt.imshow(image, cmap='coolwarm',
