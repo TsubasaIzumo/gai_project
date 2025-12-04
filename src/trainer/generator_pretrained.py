@@ -188,17 +188,76 @@ class PretrainedGeneratorModule(pl.LightningModule):
             return pretrained_unet
         
         # 3. Create new model with adapted config
-        new_config = pretrained_unet.config
+        # Use copy.deepcopy to avoid modifying the original config
+        new_config = copy.deepcopy(pretrained_unet.config)
         new_config.in_channels = self.target_in_channels
+        new_config.out_channels = self.n_channels  # Adapt output channels to match data
         new_config.sample_size = self.size_image  # Adapt image size
         
-        new_unet = UNet2DModel(**new_config)
+        # Use from_config to create the model
+        new_unet = UNet2DModel.from_config(new_config)
+        
+        # Verify and manually fix conv_in layer if needed
+        # Sometimes from_config doesn't properly apply in_channels changes
+        old_conv_in = pretrained_unet.conv_in
+        new_conv_in = new_unet.conv_in
+        
+        print(f"  Debug: old_conv_in.in_channels={old_conv_in.in_channels}, new_conv_in.in_channels={new_conv_in.in_channels}")
+        print(f"  Debug: old_conv_in.weight.shape={old_conv_in.weight.shape}, new_conv_in.weight.shape={new_conv_in.weight.shape}")
+        
+        # If conv_in still has wrong input channels, manually replace it
+        conv_in_replaced = False
+        if new_conv_in.in_channels != self.target_in_channels:
+            print(f"  Warning: conv_in has {new_conv_in.in_channels} channels, expected {self.target_in_channels}. Manually replacing...")
+            # Create new conv_in layer with correct input channels
+            out_channels = new_conv_in.out_channels
+            kernel_size = new_conv_in.kernel_size
+            stride = new_conv_in.stride
+            padding = new_conv_in.padding
+            
+            new_conv_in_layer = nn.Conv2d(
+                in_channels=self.target_in_channels,
+                out_channels=out_channels,
+                kernel_size=kernel_size,
+                stride=stride,
+                padding=padding
+            )
+            new_unet.conv_in = new_conv_in_layer
+            conv_in_replaced = True
+            print(f"  Created new conv_in layer: {new_conv_in_layer.weight.shape}")
+        
+        # Verify and manually fix conv_out layer if needed
+        # Ensure output channels match our data channels
+        old_conv_out = pretrained_unet.conv_out
+        new_conv_out = new_unet.conv_out
+        
+        print(f"  Debug: old_conv_out.out_channels={old_conv_out.out_channels}, new_conv_out.out_channels={new_conv_out.out_channels}, target={self.n_channels}")
+        
+        # If conv_out still has wrong output channels, manually replace it
+        if new_conv_out.out_channels != self.n_channels:
+            print(f"  Warning: conv_out has {new_conv_out.out_channels} channels, expected {self.n_channels}. Manually replacing...")
+            # Create new conv_out layer with correct output channels
+            in_channels = new_conv_out.in_channels
+            kernel_size = new_conv_out.kernel_size
+            stride = new_conv_out.stride
+            padding = new_conv_out.padding
+            
+            new_conv_out_layer = nn.Conv2d(
+                in_channels=in_channels,
+                out_channels=self.n_channels,
+                kernel_size=kernel_size,
+                stride=stride,
+                padding=padding
+            )
+            new_unet.conv_out = new_conv_out_layer
+            print(f"  Created new conv_out layer: {new_conv_out_layer.weight.shape}")
         
         # 4. Transfer weights
         print("Transferring pretrained weights...")
         with torch.no_grad():
             # Get pretrained model state_dict
             pretrained_state = pretrained_unet.state_dict()
+            # Get new model state_dict (after potential conv_in replacement)
             new_state = new_unet.state_dict()
             
             # Copy weights layer by layer
@@ -208,6 +267,8 @@ class PretrainedGeneratorModule(pl.LightningModule):
                     if 'conv_in.weight' in name:
                         old_weight = param  # [out_ch, in_ch_old, k, k]
                         new_weight = new_state[name]  # [out_ch, in_ch_new, k, k]
+                        
+                        print(f"  Debug: Adapting {name}: old_shape={old_weight.shape}, new_shape={new_weight.shape}")
                         
                         # Copy overlapping channels
                         min_channels = min(old_weight.shape[1], new_weight.shape[1])
@@ -224,6 +285,45 @@ class PretrainedGeneratorModule(pl.LightningModule):
                         
                         new_state[name] = new_weight
                         print(f"  Adapted layer {name}: {old_weight.shape} -> {new_weight.shape}")
+                    # Special handling for conv_out layer (different output channels)
+                    elif 'conv_out.weight' in name:
+                        old_weight = param  # [out_ch_old, in_ch, k, k]
+                        new_weight = new_state[name]  # [out_ch_new, in_ch, k, k]
+                        
+                        print(f"  Debug: Adapting {name}: old_shape={old_weight.shape}, new_shape={new_weight.shape}")
+                        
+                        # Copy overlapping output channels
+                        min_channels = min(old_weight.shape[0], new_weight.shape[0])
+                        new_weight[:min_channels, :, :, :] = old_weight[:min_channels, :, :, :]
+                        
+                        # Initialize new output channels with small random values
+                        if new_weight.shape[0] > min_channels:
+                            # Use same statistics as existing channels
+                            mean_val = old_weight.mean()
+                            std_val = old_weight.std()
+                            new_weight[min_channels:, :, :, :] = torch.randn_like(
+                                new_weight[min_channels:, :, :, :]
+                            ) * std_val * 0.1 + mean_val
+                        
+                        new_state[name] = new_weight
+                        print(f"  Adapted layer {name}: {old_weight.shape} -> {new_weight.shape}")
+                    # Special handling for conv_out bias
+                    elif 'conv_out.bias' in name:
+                        old_bias = param  # [out_ch_old]
+                        new_bias = new_state[name]  # [out_ch_new]
+                        
+                        print(f"  Debug: Adapting {name}: old_shape={old_bias.shape}, new_shape={new_bias.shape}")
+                        
+                        # Copy overlapping output channels
+                        min_channels = min(old_bias.shape[0], new_bias.shape[0])
+                        new_bias[:min_channels] = old_bias[:min_channels]
+                        
+                        # Initialize new output channels with zeros (common for bias)
+                        if new_bias.shape[0] > min_channels:
+                            new_bias[min_channels:] = 0.0
+                        
+                        new_state[name] = new_bias
+                        print(f"  Adapted layer {name}: {old_bias.shape} -> {new_bias.shape}")
                     else:
                         # Other layers: direct copy
                         if param.shape == new_state[name].shape:
@@ -492,6 +592,18 @@ class PretrainedGeneratorModule(pl.LightningModule):
             if self.trainer.is_global_zero:
                 print(f"Unfreezing prior network at step {self.global_step}")
 
+    def on_train_start(self):
+        """Ensure all models are on the correct device"""
+        # PyTorch Lightning automatically moves registered modules, but we ensure model_ema is synced
+        if self.model_ema is not None:
+            # Ensure model_ema is on the same device as model
+            model_device = next(self.model.parameters()).device
+            model_ema_device = next(self.model_ema.parameters()).device
+            if model_device != model_ema_device:
+                self.model_ema = self.model_ema.to(model_device)
+                if self.trainer.is_global_zero:
+                    print(f"Model EMA moved to device: {model_device}")
+
     def on_train_batch_end(self, outputs, batch, batch_idx, dataloader_idx=0):
         """Update EMA model"""
         self._update_ema()
@@ -499,6 +611,11 @@ class PretrainedGeneratorModule(pl.LightningModule):
     def _update_ema(self) -> None:
         """Update EMA model parameters"""
         if self.training:
+            # Ensure both models are on the same device
+            model_device = next(self.model.parameters()).device
+            model_ema_device = next(self.model_ema.parameters()).device
+            if model_device != model_ema_device:
+                self.model_ema = self.model_ema.to(model_device)
             update_ema(self.model_ema.parameters(), self.model.parameters(), rate=self.ema_rate)
 
     @torch.no_grad()
@@ -562,9 +679,18 @@ class PretrainedGeneratorModule(pl.LightningModule):
                 # Model prediction
                 t_tensor = torch.tensor([t] * b, device=device)
                 model_output = self.model_ema(model_input, t_tensor).sample
+                
+                # Ensure model_output has correct number of channels
+                if model_output.shape[1] != self.n_channels:
+                    # If output channels don't match, take first n_channels
+                    model_output = model_output[:, :self.n_channels, :, :]
 
                 # Scheduler step
                 image = self.scheduler.step(model_output, t, image).prev_sample
+                
+                # Ensure image has correct number of channels (safety check)
+                if image.shape[1] != self.n_channels:
+                    image = image[:, :self.n_channels, :, :]
 
             # Clip if needed
             if self.clip_denoised:

@@ -27,7 +27,7 @@ def main():
     
     # Load config
     print(f"Loading config file: {args.config}")
-    with open(args.config, 'r') as f:
+    with open(args.config, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
     
     # Test mode configuration
@@ -41,18 +41,36 @@ def main():
     print("Creating pretrained model...")
     model = PretrainedGeneratorModule(config)
     
+    # 检测PyTorch Lightning版本以兼容不同版本（需要在创建callbacks之前检测）
+    pl_version = pl.__version__
+    pl_major, pl_minor = map(int, pl_version.split('.')[:2])
+    is_new_version = pl_major >= 2 or (pl_major == 1 and pl_minor >= 5)
+    print(f"\nPyTorch Lightning version: {pl_version} ({'new' if is_new_version else 'legacy'} API)")
+    
     # 配置callbacks
     callbacks = []
     
-    # Checkpoint callback
-    checkpoint_callback = ModelCheckpoint(
-        monitor='val/total_loss',
-        dirpath='checkpoints_pretrained',
-        filename='pretrained-{epoch:02d}-{step}-{val/total_loss:.4f}',
-        save_top_k=3,
-        mode='min',
-        save_last=True,
-    )
+    # Checkpoint callback - 根据版本使用不同的参数
+    if is_new_version:
+        # 新版本 (>= 1.5.0): 使用 dirpath, save_last
+        checkpoint_callback = ModelCheckpoint(
+            monitor='val/total_loss',
+            dirpath='checkpoints_pretrained',
+            filename='pretrained-{epoch:02d}-{step}-{val/total_loss:.4f}',
+            save_top_k=3,
+            mode='min',
+            save_last=True,
+        )
+    else:
+        # 旧版本 (< 1.5.0): 只使用 filename, every_n_val_epochs（参照 train_generator.py）
+        # 注意：旧版本会将 checkpoint 保存到 logger 的目录下
+        checkpoint_callback = ModelCheckpoint(
+            monitor='val/total_loss',
+            filename='pretrained-{epoch:02d}-{step}-{val/total_loss:.4f}',
+            save_top_k=3,
+            mode='min',
+            every_n_val_epochs=1,
+        )
     callbacks.append(checkpoint_callback)
     
     # Early stopping
@@ -67,8 +85,13 @@ def main():
         callbacks.append(early_stop_callback)
         print(f"✓ Early stopping enabled (patience={config['early_stopping']['patience']})")
     
-    # Learning rate monitor
-    lr_monitor = LearningRateMonitor(logging_interval='step')
+    # Learning rate monitor - 根据版本使用不同的参数
+    if is_new_version:
+        # 新版本 (>= 1.5.0): 使用关键字参数
+        lr_monitor = LearningRateMonitor(logging_interval='step')
+    else:
+        # 旧版本 (< 1.5.0): 使用位置参数（参照 train_generator.py）
+        lr_monitor = LearningRateMonitor('step')
     callbacks.append(lr_monitor)
     
     # Logger
@@ -81,21 +104,39 @@ def main():
     
     # Create trainer
     print("\nConfiguring Trainer...")
-    trainer = pl.Trainer(
-        max_steps=config['iterations'],
-        callbacks=callbacks,
-        logger=logger,
-        accelerator='gpu' if args.gpus > 0 else 'cpu',
-        devices=args.gpus if args.gpus > 0 else 1,
-        strategy='ddp' if args.gpus > 1 else 'auto',
-        precision=16 if config.get('fp16', False) else 32,
-        gradient_clip_val=1.0,  # Gradient clipping
-        accumulate_grad_batches=config.get('accumulate_grad_batches', 1),
-        log_every_n_steps=50,
-        val_check_interval=config.get('eval_every', 1.0),
-        enable_progress_bar=True,
-        enable_model_summary=True,
-    )
+    
+    # 基础参数（所有版本通用）
+    trainer_kwargs = {
+        'max_steps': config['iterations'],
+        'callbacks': callbacks,
+        'logger': logger,
+        'precision': 16 if config.get('fp16', False) else 32,
+        'gradient_clip_val': 1.0,
+        'accumulate_grad_batches': config.get('accumulate_grad_batches', 1),
+    }
+    
+    # 根据版本添加版本特定的参数
+    if is_new_version:
+        # 新版本 (>= 1.5.0): 使用 accelerator, devices, strategy
+        trainer_kwargs['accelerator'] = 'gpu' if args.gpus > 0 else 'cpu'
+        trainer_kwargs['devices'] = args.gpus if args.gpus > 0 else 1
+        trainer_kwargs['strategy'] = 'ddp' if args.gpus > 1 else 'auto'
+        trainer_kwargs['enable_progress_bar'] = True
+        trainer_kwargs['enable_model_summary'] = True
+        trainer_kwargs['log_every_n_steps'] = 50
+        trainer_kwargs['val_check_interval'] = config.get('eval_every', 1.0)
+    else:
+        # 旧版本 (< 1.5.0): 使用 gpus, distributed_backend（参照 train_generator.py）
+        trainer_kwargs['gpus'] = args.gpus if args.gpus > 0 else None
+        if args.gpus > 1:
+            trainer_kwargs['distributed_backend'] = 'ddp'
+        trainer_kwargs['progress_bar_refresh_rate'] = 50
+        trainer_kwargs['check_val_every_n_epoch'] = config.get('eval_every', 1.0)
+        # 旧版本使用 resume_from_checkpoint 参数（在 Trainer 初始化时传递）
+        if args.resume:
+            trainer_kwargs['resume_from_checkpoint'] = args.resume
+    
+    trainer = pl.Trainer(**trainer_kwargs)
     
     # Print configuration summary
     print("\n" + "="*60)
@@ -121,7 +162,13 @@ def main():
     # Start training
     print("Starting training...\n")
     try:
-        trainer.fit(model, ckpt_path=args.resume)
+        # 根据版本使用不同的恢复方式
+        if is_new_version and args.resume:
+            # 新版本 (>= 1.5.0): 使用 ckpt_path 参数
+            trainer.fit(model, ckpt_path=args.resume)
+        else:
+            # 旧版本 (< 1.5.0): resume_from_checkpoint 已在 Trainer 初始化时设置
+            trainer.fit(model)
         print("\n✓ Training completed!")
         print(f"Best model: {checkpoint_callback.best_model_path}")
     except KeyboardInterrupt:

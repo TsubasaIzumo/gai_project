@@ -25,7 +25,6 @@ schedule_sampler: uniform
 model:
   use_y_conditioning: False
   diffusion_steps: 1000
-  attention_resolutions: "32,16,8"
 
 latent:
   enabled: True
@@ -37,11 +36,11 @@ latent:
   prior_freeze_steps: 0
   prior:
     base_channels: 32
-    num_layers: 4
+    num_layers: 3
     max_channels: 256
   encoder:
     base_channels: 32
-    num_layers: 4
+    num_layers: 3
     max_channels: 256
 
 dataset:

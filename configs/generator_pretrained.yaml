@@ -1,7 +1,7 @@
 # 预训练扩散模型配置
 # 使用HuggingFace预训练DDPM + 变分推断架构
 
-batch_size: 11
+batch_size: 5
 n_workers: 16
 iterations: 100000        # 预训练模型收敛更快
 eval_every: 1
