@@ -3,17 +3,17 @@
 
 batch_size: 8            # Cluster环境，可以增大batch size加快训练
 n_workers: 16
-iterations: 50000        # 预训练模型收敛更快，30000步通常足够
+iterations: 30000        # 预训练模型收敛更快，30000步通常足够
 eval_every: 1
 accumulate_grad_batches: 1
-fp16: True              # 如果显存充足，可以设置为True进一步加速
+fp16: False             # 设置为False避免推理时的数据类型不匹配问题
 clip_denoised: True
 ema_rate: 0.999
 
 # Early Stopping 配置
 early_stopping:
   enabled: True
-  patience: 5
+  patience: 3
   min_delta: 0.001
   monitor: val/total_loss
 
@@ -33,7 +33,7 @@ pretrained:
   #   - google/ddpm-ema-church-256: 256x256 教堂数据集
   #   - google/ddpm-bedroom-256: 256x256 卧室数据集
   model_id: "google/ddpm-celebahq-256"
-  
+
   # 🌟 轻量化配置（可选）
   # 如果未指定或设置为null，将使用原始预训练模型的完整大小
   # 预设选项：
@@ -41,13 +41,13 @@ pretrained:
   #   - "medium": 参数量减少约50%（block_out_channels减半，layers_per_block保持原值）
   #   - "large": 使用原始预训练模型（等同于null）
   #   - null: 使用原始预训练模型（默认）
-  model_size: "medium"  # 可选: "small", "medium", "large", null
-  
+  model_size: "small"  # 可选: "small", "medium", "large", null
+
   # 冻结策略
   # - "all": 完全冻结扩散模型，只训练变分推断模块
   # - "partial": 部分冻结，只训练指定模块
   # - "none": 不冻结，全部微调
-  freeze_strategy: "partial"
+  freeze_strategy: "all"
 
   # 当freeze_strategy为"partial"时，指定可训练的模块
   # 推荐配置：只训练输入层和第一个下采样块
@@ -58,26 +58,26 @@ pretrained:
 # 模型配置（用于scheduler初始化）
 model:
   use_y_conditioning: False
-  diffusion_steps: 1000    # 与预训练模型一致
+  diffusion_steps: 200    # 与预训练模型一致
   attention_resolutions: "32,16,8"  # 此配置仅用于记录，实际由预训练模型决定
 
 # 🌟 变分推断配置（保持不变）
 latent:
   enabled: True
-  
+
   # 潜变量配置
   dim: 64                     # 潜变量维度
   project_channels: 4         # 投影到空间特征图的通道数
-  
+
   # KL散度权重
   beta_max: 0.01              # KL权重上限
-  # beta_warmup_steps: 2000     # warmup步数（快速收敛，缩短到2000步）
-  beta_warmup_steps: 3000     # warmup步数（快速收敛，缩短到2000步）
+  beta_warmup_steps: 2000     # warmup步数（快速收敛，缩短到2000步）
+#  beta_warmup_steps: 3000     # warmup步数（快速收敛，缩短到2000步）
   free_bits: 0.0              # free bits阈值
-  
+
   # 两阶段训练
-#  prior_freeze_steps: 1000    # prior冻结步数（快速收敛，缩短到1000步）
-  prior_freeze_steps: 2000    # prior冻结步数（快速收敛，缩短到1000步）
+  prior_freeze_steps: 1000    # prior冻结步数（快速收敛，缩短到1000步）
+#  prior_freeze_steps: 2000    # prior冻结步数（快速收敛，缩短到1000步）
 
   # 编码器配置
   prior:
@@ -91,7 +91,8 @@ latent:
 
 # 数据集配置
 dataset:
-  image_path: /home/ldingaj/dataset/radio_images
+  image_path: /home/ldingaj/dataset/D1
+#  image_path: D:\datasets\radio_images
   label_path:
   size: 512                 # 目标图像尺寸
   n_classes:
@@ -102,9 +103,7 @@ dataset:
   use_zeros: True
   max_samples: None         # 限制整个数据集最多使用5000个样本（None表示使用全部）
 
-
-comment: pretrained_ddpm_with_variational_inference_medium
-
+comment: pretrained_ddpm_with_variational_inference
 # 配置说明：
 #
 # 1. 预训练模型优势

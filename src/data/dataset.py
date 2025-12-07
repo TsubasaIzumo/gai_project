@@ -106,12 +106,27 @@ class MakeDataLoader:
     """Class that creates train, valid and test datasets/dataloaders"""
     def __init__(self, folder_images, image_size, test_size=0.5,
                 random_state=2, augmented=True, real_data=False, power=10,
-                from_uv=False, use_zeros=False):
+                from_uv=False, use_zeros=False, max_samples=None):
 
         print("dataset ", power, from_uv, use_zeros)
-        self.dataset = SkaDataset(folder_images, image_size, power=power, from_uv=from_uv)
+        original_dataset = SkaDataset(folder_images, image_size, power=power, from_uv=from_uv)
+        
         if not augmented:
-            self.dataset.test_data = True
+            original_dataset.test_data = True
+        
+        # 限制数据集大小（如果指定）
+        if max_samples is not None and max_samples > 0:
+            original_size = len(original_dataset)
+            if max_samples < original_size:
+                # 只使用前max_samples个样本
+                indices = list(range(min(max_samples, original_size)))
+                self.dataset = Subset(original_dataset, indices)
+                print(f"Dataset size limited: {original_size} -> {len(self.dataset)} samples")
+            else:
+                self.dataset = original_dataset
+                print(f"max_samples ({max_samples}) >= dataset size ({original_size}), using all samples")
+        else:
+            self.dataset = original_dataset
         if real_data:
             train_idx = []
             valid_idx = []
@@ -169,3 +184,4 @@ class MakeDataLoader:
                               **kwargs) -> DataLoader:
         return DataLoader(self.dataset_valid, batch_size=batch_size, shuffle=shuffle, drop_last=True,
                           pin_memory=False, **kwargs)
+

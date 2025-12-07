@@ -2,7 +2,7 @@
 #SBATCH --job-name=pretrained_ddpm         # 作业名称
 #SBATCH --nodes=1                          # 使用1个节点
 #SBATCH --gpus=1                           # 请求1块GPU
-#SBATCH --time=00:08:00                    # 最长运行24小时
+#SBATCH --time=10:00:00                    # 最长运行24小时
 #SBATCH --partition=normal                 # 分区（根据你集群设置确认）
 #SBATCH --account=mscaisuperpod            # 替换成你的项目账户名
 

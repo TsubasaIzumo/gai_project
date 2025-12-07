@@ -62,10 +62,9 @@ OUTPUT_DIR="./results/generated_pretrained_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$OUTPUT_DIR"
 
 # 设置生成参数
-RUNS_PER_SAMPLE=10
+RUNS_PER_SAMPLE=5
 BATCH_SIZE=5
 NUM_LATENT_SAMPLES=5
-
 
 # 运行生成
 echo "=========================================="
@@ -76,7 +75,7 @@ echo "每个样本运行次数: $RUNS_PER_SAMPLE"
 echo ""
 
 python generate_images_pretrained.py \
-    --config "./configs/generator_pretrained.yaml" \
+    --config "./configs/generate_lightweight.yaml" \
     --ckpt "$CKPT_PATH" \
     --output "$OUTPUT_DIR" \
     --bs $BATCH_SIZE \
@@ -107,7 +106,7 @@ echo "每个样本运行次数: $RUNS_PER_SAMPLE"
 echo ""
 
 python compute_reconstruction_metrics.py \
-    --config "./configs/generator_pretrained.yaml" \
+    --config "./configs/generate_lightweight.yaml" \
     --runs_per_sample $RUNS_PER_SAMPLE \
     --folders "$OUTPUT_DIR"
 
@@ -130,3 +129,7 @@ echo "全部完成"
 echo "最终结束时间: $(date)"
 echo "输出目录: $OUTPUT_DIR"
 echo "=========================================="
+
+
+
+

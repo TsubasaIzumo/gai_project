@@ -76,6 +76,10 @@ class PretrainedGeneratorModule(pl.LightningModule):
         self.freeze_strategy = pretrained_cfg.get('freeze_strategy', 'partial')  # 'all', 'partial', 'none'
         self.trainable_modules = pretrained_cfg.get('trainable_modules', ['conv_in', 'down_blocks.0'])
         
+        # Lightweight model configuration (preset only)
+        # Use pretrained_model_size to avoid conflict with PyTorch Lightning's internal attributes
+        self.pretrained_model_size = pretrained_cfg.get('model_size', None)  # None, 'small', 'medium', 'large'
+        
         # Data loader
         use_zeros = config['dataset']['use_zeros']
         from_uv = config['dataset']['from_uv']
@@ -87,7 +91,8 @@ class PretrainedGeneratorModule(pl.LightningModule):
             real_data=real_data,
             power=power, 
             use_zeros=use_zeros, 
-            from_uv=from_uv
+            from_uv=from_uv,
+            max_samples=config['dataset'].get('max_samples', None)
         )
         
         # Training parameters
@@ -172,9 +177,50 @@ class PretrainedGeneratorModule(pl.LightningModule):
             self.model = self.model.half()
             self.model_ema = self.model_ema.half()
 
+    def _get_model_size_config(self, original_config) -> Optional[Dict]:
+        """
+        Get model configuration based on model_size preset
+        
+        Returns:
+            Dict with block_out_channels, layers_per_block, attention_head_dim, or None if using original model
+        """
+        if self.pretrained_model_size is None:
+            # Use original model
+            return None
+        
+        # Use preset based on original config
+        original_channels = list(original_config.block_out_channels)
+        
+        if self.pretrained_model_size == "small":
+            # Reduce channels by ~75%: halve all channels, reduce layers
+            block_out_channels = tuple([c // 2 for c in original_channels])
+            layers_per_block = 1
+            # Reduce attention head dim if available
+            if hasattr(original_config, 'attention_head_dim') and original_config.attention_head_dim is not None:
+                attention_head_dim = max(4, original_config.attention_head_dim // 2)
+            else:
+                attention_head_dim = None
+        elif self.pretrained_model_size == "medium":
+            # Reduce channels by ~50%: halve all channels, keep layers
+            block_out_channels = tuple([c // 2 for c in original_channels])
+            layers_per_block = original_config.layers_per_block
+            attention_head_dim = original_config.attention_head_dim if hasattr(original_config, 'attention_head_dim') else None
+        elif self.pretrained_model_size == "large":
+            # Use original model - return None to indicate no changes needed
+            return None
+        else:
+            raise ValueError(f"Unknown model_size: {self.pretrained_model_size}. Must be 'small', 'medium', or 'large'")
+        
+        return {
+            'block_out_channels': block_out_channels,
+            'layers_per_block': layers_per_block,
+            'attention_head_dim': attention_head_dim
+        }
+ 
     def _load_and_adapt_pretrained_unet(self) -> UNet2DModel:
         """
         Load pretrained UNet model and adapt input channels
+        Supports lightweight model configuration via model_size preset
         """
         # 1. Load pretrained model
         pretrained_unet = UNet2DModel.from_pretrained(self.pretrained_model_id)
@@ -183,8 +229,12 @@ class PretrainedGeneratorModule(pl.LightningModule):
         print(f"Pretrained model input channels: {pretrained_in_channels}")
         print(f"Target input channels: {self.target_in_channels}")
         
-        # 2. If channels match, return directly
-        if pretrained_in_channels == self.target_in_channels:
+        # 2. Check if we need lightweight model
+        lightweight_config = self._get_model_size_config(pretrained_unet.config)
+        use_lightweight = lightweight_config is not None
+        
+        if not use_lightweight and pretrained_in_channels == self.target_in_channels:
+            # No lightweight config and channels match, return directly
             return pretrained_unet
         
         # 3. Create new model with adapted config
@@ -194,8 +244,26 @@ class PretrainedGeneratorModule(pl.LightningModule):
         new_config.out_channels = self.n_channels  # Adapt output channels to match data
         new_config.sample_size = self.size_image  # Adapt image size
         
+        # Apply lightweight configuration if specified
+        if lightweight_config:
+            print(f"Applying lightweight configuration: model_size={self.pretrained_model_size}")
+            new_config.block_out_channels = lightweight_config['block_out_channels']
+            new_config.layers_per_block = lightweight_config['layers_per_block']
+            if lightweight_config.get('attention_head_dim') is not None:
+                new_config.attention_head_dim = lightweight_config['attention_head_dim']
+            print(f"  block_out_channels: {list(pretrained_unet.config.block_out_channels)} -> {list(new_config.block_out_channels)}")
+            print(f"  layers_per_block: {pretrained_unet.config.layers_per_block} -> {new_config.layers_per_block}")
+            if lightweight_config.get('attention_head_dim') is not None:
+                print(f"  attention_head_dim: {pretrained_unet.config.attention_head_dim if hasattr(pretrained_unet.config, 'attention_head_dim') else 'N/A'} -> {new_config.attention_head_dim}")
+        
         # Use from_config to create the model
         new_unet = UNet2DModel.from_config(new_config)
+        
+        # Print model size comparison
+        pretrained_params = sum(p.numel() for p in pretrained_unet.parameters())
+        new_params = sum(p.numel() for p in new_unet.parameters())
+        reduction = (1 - new_params / pretrained_params) * 100
+        print(f"Model size: {pretrained_params:,} -> {new_params:,} parameters ({reduction:.1f}% reduction)")
         
         # Verify and manually fix conv_in layer if needed
         # Sometimes from_config doesn't properly apply in_channels changes
@@ -252,85 +320,169 @@ class PretrainedGeneratorModule(pl.LightningModule):
             new_unet.conv_out = new_conv_out_layer
             print(f"  Created new conv_out layer: {new_conv_out_layer.weight.shape}")
         
-        # 4. Transfer weights
-        print("Transferring pretrained weights...")
+        # 4. Transfer weights intelligently
+        print("Transferring pretrained weights (intelligent transfer)...")
         with torch.no_grad():
             # Get pretrained model state_dict
             pretrained_state = pretrained_unet.state_dict()
             # Get new model state_dict (after potential conv_in replacement)
             new_state = new_unet.state_dict()
             
+            # Statistics
+            total_params = len(new_state)
+            transferred_params = 0
+            adapted_params = 0
+            skipped_params = 0
+            
             # Copy weights layer by layer
             for name, param in pretrained_state.items():
-                if name in new_state:
-                    # Special handling for conv_in layer (different input channels)
-                    if 'conv_in.weight' in name:
-                        old_weight = param  # [out_ch, in_ch_old, k, k]
-                        new_weight = new_state[name]  # [out_ch, in_ch_new, k, k]
-                        
-                        print(f"  Debug: Adapting {name}: old_shape={old_weight.shape}, new_shape={new_weight.shape}")
-                        
-                        # Copy overlapping channels
-                        min_channels = min(old_weight.shape[1], new_weight.shape[1])
-                        new_weight[:, :min_channels, :, :] = old_weight[:, :min_channels, :, :]
-                        
-                        # Initialize new channels with small random values
-                        if new_weight.shape[1] > min_channels:
-                            # Use same statistics as existing channels
-                            mean_val = old_weight.mean()
-                            std_val = old_weight.std()
-                            new_weight[:, min_channels:, :, :] = torch.randn_like(
-                                new_weight[:, min_channels:, :, :]
-                            ) * std_val * 0.1 + mean_val
-                        
-                        new_state[name] = new_weight
-                        print(f"  Adapted layer {name}: {old_weight.shape} -> {new_weight.shape}")
-                    # Special handling for conv_out layer (different output channels)
-                    elif 'conv_out.weight' in name:
-                        old_weight = param  # [out_ch_old, in_ch, k, k]
-                        new_weight = new_state[name]  # [out_ch_new, in_ch, k, k]
-                        
-                        print(f"  Debug: Adapting {name}: old_shape={old_weight.shape}, new_shape={new_weight.shape}")
-                        
-                        # Copy overlapping output channels
-                        min_channels = min(old_weight.shape[0], new_weight.shape[0])
-                        new_weight[:min_channels, :, :, :] = old_weight[:min_channels, :, :, :]
-                        
-                        # Initialize new output channels with small random values
-                        if new_weight.shape[0] > min_channels:
-                            # Use same statistics as existing channels
-                            mean_val = old_weight.mean()
-                            std_val = old_weight.std()
-                            new_weight[min_channels:, :, :, :] = torch.randn_like(
-                                new_weight[min_channels:, :, :, :]
-                            ) * std_val * 0.1 + mean_val
-                        
-                        new_state[name] = new_weight
-                        print(f"  Adapted layer {name}: {old_weight.shape} -> {new_weight.shape}")
-                    # Special handling for conv_out bias
-                    elif 'conv_out.bias' in name:
-                        old_bias = param  # [out_ch_old]
-                        new_bias = new_state[name]  # [out_ch_new]
-                        
-                        print(f"  Debug: Adapting {name}: old_shape={old_bias.shape}, new_shape={new_bias.shape}")
-                        
-                        # Copy overlapping output channels
-                        min_channels = min(old_bias.shape[0], new_bias.shape[0])
-                        new_bias[:min_channels] = old_bias[:min_channels]
-                        
-                        # Initialize new output channels with zeros (common for bias)
-                        if new_bias.shape[0] > min_channels:
-                            new_bias[min_channels:] = 0.0
-                        
-                        new_state[name] = new_bias
-                        print(f"  Adapted layer {name}: {old_bias.shape} -> {new_bias.shape}")
+                if name not in new_state:
+                    skipped_params += 1
+                    continue
+                
+                new_param = new_state[name]
+                
+                # Case 1: Exact shape match - direct copy
+                if param.shape == new_param.shape:
+                    new_state[name] = param
+                    transferred_params += 1
+                
+                # Case 2: conv_in layer (different input channels)
+                elif 'conv_in.weight' in name:
+                    old_weight = param  # [out_ch, in_ch_old, k, k]
+                    new_weight = new_param  # [out_ch, in_ch_new, k, k]
+                    
+                    # Copy overlapping channels
+                    min_out = min(old_weight.shape[0], new_weight.shape[0])
+                    min_in = min(old_weight.shape[1], new_weight.shape[1])
+                    new_weight[:min_out, :min_in, :, :] = old_weight[:min_out, :min_in, :, :]
+                    
+                    # Initialize new channels with small random values
+                    if new_weight.shape[1] > min_in:
+                        mean_val = old_weight.mean()
+                        std_val = old_weight.std()
+                        new_weight[:, min_in:, :, :] = torch.randn_like(
+                            new_weight[:, min_in:, :, :]
+                        ) * std_val * 0.1 + mean_val
+                    
+                    if new_weight.shape[0] > min_out:
+                        mean_val = old_weight.mean()
+                        std_val = old_weight.std()
+                        new_weight[min_out:, :, :, :] = torch.randn_like(
+                            new_weight[min_out:, :, :, :]
+                        ) * std_val * 0.1 + mean_val
+                    
+                    new_state[name] = new_weight
+                    adapted_params += 1
+                
+                # Case 3: conv_out layer (different output channels)
+                elif 'conv_out.weight' in name:
+                    old_weight = param  # [out_ch_old, in_ch, k, k]
+                    new_weight = new_param  # [out_ch_new, in_ch, k, k]
+                    
+                    # Copy overlapping channels
+                    min_out = min(old_weight.shape[0], new_weight.shape[0])
+                    min_in = min(old_weight.shape[1], new_weight.shape[1])
+                    new_weight[:min_out, :min_in, :, :] = old_weight[:min_out, :min_in, :, :]
+                    
+                    # Initialize new channels
+                    if new_weight.shape[0] > min_out:
+                        mean_val = old_weight.mean()
+                        std_val = old_weight.std()
+                        new_weight[min_out:, :, :, :] = torch.randn_like(
+                            new_weight[min_out:, :, :, :]
+                        ) * std_val * 0.1 + mean_val
+                    
+                    if new_weight.shape[1] > min_in:
+                        mean_val = old_weight.mean()
+                        std_val = old_weight.std()
+                        new_weight[:, min_in:, :, :] = torch.randn_like(
+                            new_weight[:, min_in:, :, :]
+                        ) * std_val * 0.1 + mean_val
+                    
+                    new_state[name] = new_weight
+                    adapted_params += 1
+                
+                # Case 4: conv_out bias
+                elif 'conv_out.bias' in name:
+                    old_bias = param  # [out_ch_old]
+                    new_bias = new_param  # [out_ch_new]
+                    
+                    min_channels = min(old_bias.shape[0], new_bias.shape[0])
+                    new_bias[:min_channels] = old_bias[:min_channels]
+                    
+                    if new_bias.shape[0] > min_channels:
+                        new_bias[min_channels:] = 0.0
+                    
+                    new_state[name] = new_bias
+                    adapted_params += 1
+                
+                # Case 5: Convolutional layers with channel mismatch (in down/up blocks)
+                elif len(param.shape) == 4 and len(new_param.shape) == 4:  # Conv2d weights
+                    # Format: [out_ch, in_ch, k, k]
+                    old_out, old_in = param.shape[0], param.shape[1]
+                    new_out, new_in = new_param.shape[0], new_param.shape[1]
+                    
+                    # Only transfer if new model channels are subset of old model channels
+                    if new_out <= old_out and new_in <= old_in:
+                        new_param[:, :, :, :] = param[:new_out, :new_in, :, :]
+                        new_state[name] = new_param
+                        adapted_params += 1
                     else:
-                        # Other layers: direct copy
-                        if param.shape == new_state[name].shape:
-                            new_state[name] = param
+                        # Shape mismatch too large, keep random initialization
+                        skipped_params += 1
+                
+                # Case 6: Linear/1D layers (time embedding, etc.)
+                elif len(param.shape) == 2 and len(new_param.shape) == 2:  # Linear weights
+                    old_out, old_in = param.shape
+                    new_out, new_in = new_param.shape
+                    
+                    # Transfer overlapping part
+                    if new_out <= old_out and new_in <= old_in:
+                        new_param[:, :] = param[:new_out, :new_in]
+                        new_state[name] = new_param
+                        adapted_params += 1
+                    elif new_out >= old_out and new_in >= old_in:
+                        # New model is larger, copy what we can
+                        new_param[:old_out, :old_in] = param
+                        # Initialize rest with small random values
+                        mean_val = param.mean()
+                        std_val = param.std()
+                        if new_out > old_out:
+                            new_param[old_out:, :] = torch.randn_like(
+                                new_param[old_out:, :]
+                            ) * std_val * 0.1 + mean_val
+                        if new_in > old_in:
+                            new_param[:, old_in:] = torch.randn_like(
+                                new_param[:, old_in:]
+                            ) * std_val * 0.1 + mean_val
+                        new_state[name] = new_param
+                        adapted_params += 1
+                    else:
+                        skipped_params += 1
+                
+                # Case 7: Bias terms (1D)
+                elif len(param.shape) == 1 and len(new_param.shape) == 1:
+                    min_len = min(param.shape[0], new_param.shape[0])
+                    new_param[:min_len] = param[:min_len]
+                    if new_param.shape[0] > min_len:
+                        new_param[min_len:] = 0.0
+                    new_state[name] = new_param
+                    adapted_params += 1
+                
+                # Case 8: Other parameters - skip (keep random initialization)
+                else:
+                    skipped_params += 1
             
             # Load adapted weights
-            new_unet.load_state_dict(new_state)
+            new_unet.load_state_dict(new_state, strict=False)
+            
+            # Print statistics
+            print(f"Weight transfer statistics:")
+            print(f"  Total parameters: {total_params}")
+            print(f"  Directly transferred: {transferred_params} ({100*transferred_params/total_params:.1f}%)")
+            print(f"  Adapted (partial transfer): {adapted_params} ({100*adapted_params/total_params:.1f}%)")
+            print(f"  Skipped (random init): {skipped_params} ({100*skipped_params/total_params:.1f}%)")
         
         print("Weight transfer completed!")
         return new_unet
@@ -701,3 +853,4 @@ class PretrainedGeneratorModule(pl.LightningModule):
         if num_latent_samples == 1:
             return samples[0]
         return torch.stack(samples, dim=1)
+

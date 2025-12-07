@@ -66,7 +66,8 @@ class GeneratorModule(pl.LightningModule):
 
         self.make_dl = MakeDataLoader(folder_images=path_image,
                                       image_size=self.size_image, real_data=real_data,
-                                      power=power, use_zeros=use_zeros, from_uv=from_uv
+                                      power=power, use_zeros=use_zeros, from_uv=from_uv,
+                                      max_samples=config['dataset'].get('max_samples', None)
                                       )
 
         # training parameters

@@ -11,8 +11,7 @@ import numpy as np
 import torch
 
 from src.trainer.generator_pretrained import PretrainedGeneratorModule
-from src.utils import get_config
-
+from src.utils import get_config, str2bool
 
 def torch_to_image_numpy(tensor: torch.Tensor):
     """Convert torch tensor to numpy image"""
@@ -98,7 +97,7 @@ def main(args) -> None:
     print("\nLoading pretrained model...")
     try:
         module = PretrainedGeneratorModule.load_from_checkpoint(
-            checkpoint_path=path_checkpoint,
+            path_checkpoint,
             strict=False,
             config=config,
             use_fp16=config.get('fp16', False),
@@ -132,11 +131,14 @@ def main(args) -> None:
     print("\n" + "="*60)
     print("Generation Configuration")
     print("="*60)
-    print(f"Pretrained model: {config['pretrained']['model_id']}")
-    print(f"Variational inference: {'Enabled' if config['latent']['enabled'] else 'Disabled'}")
-    if config['latent']['enabled']:
-        print(f"  - Latent dimension: {config['latent']['dim']}")
-        print(f"  - Project channels: {config['latent']['project_channels']}")
+    pretrained_cfg = config.get('pretrained', {})
+    latent_cfg = config.get('latent', {})
+    print(f"Pretrained model: {pretrained_cfg.get('model_id', 'N/A')}")
+    latent_enabled = latent_cfg.get('enabled', False)
+    print(f"Variational inference: {'Enabled' if latent_enabled else 'Disabled'}")
+    if latent_enabled:
+        print(f"  - Latent dimension: {latent_cfg.get('dim', 'N/A')}")
+        print(f"  - Project channels: {latent_cfg.get('project_channels', 'N/A')}")
     print(f"Runs per sample: {runs_per_sample}")
     print(f"Latent samples per generation: {num_latent_samples}")
     print(f"Total generations = {len(data_loader)} batches × {args.bs} × {runs_per_sample} × {num_latent_samples}")
@@ -177,7 +179,8 @@ def main(args) -> None:
             
             # Optional: save conditional input and true images (only for first batch)
             if batch_idx == 0:
-                for b in range(min(batch_size, 10)):  # Save at most 10
+                current_batch_size = dirty_noisy.shape[0]
+                for b in range(min(current_batch_size, 10)):  # Save at most 10
                     np.save(output_path / f"input_dirty_{b:04d}.npy", dirty_noisy[b].cpu().numpy())
                     np.save(output_path / f"input_true_{b:04d}.npy", true_images[b].cpu().numpy())
     
@@ -205,8 +208,9 @@ if __name__ == '__main__':
                         help='Number of latent samples per generation')
     parser.add_argument('--use_ckpt_config', action='store_true',
                         help='Load config from checkpoint (recommended)')
-    parser.add_argument('--latent_enabled', type=bool, default=None,
-                        help='Override latent.enabled config')
+    parser.add_argument('--latent_enabled', type=lambda x: None if x is None else str2bool(x),
+                        default=None,
+                        help='Override latent.enabled config (true/false)')
     parser.add_argument('--latent_dim', type=int, default=None,
                         help='Override latent.dim config')
     parser.add_argument('--latent_project_channels', type=int, default=None,

@@ -17,7 +17,7 @@ def get_device() -> str:
 
 
 def get_config(config):
-    with open(config, 'r') as stream:
+    with open(config, 'r', encoding='utf-8') as stream:
         return yaml.load(stream, Loader=yaml.FullLoader)
 
 

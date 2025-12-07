@@ -1,0 +1,13 @@
+# 预训练扩散模型的额外依赖
+# 在原有依赖基础上添加这些包
+
+# HuggingFace Diffusers库（核心依赖）
+diffusers>=0.21.0
+
+# 如果未安装以下包，也需要安装
+# transformers>=4.25.0  # diffusers的依赖
+# accelerate>=0.12.0    # 用于模型加载优化
+
+# 安装命令：
+# pip install -r requirements_pretrained.txt
+
